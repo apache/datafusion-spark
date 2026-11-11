@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
+# SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
+
+[package]
+name = "datafusion-spark-sqllogictest"
+description = "sqllogictest runner for datafusion-spark"
+version = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+edition = { workspace = true }
+publish = false
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+datafusion = { workspace = true, default-features = true }
+datafusion-spark = { path = "../spark", features = ["core"] }
+datafusion-sqllogictest = { git = "https://github.com/apache/datafusion", branch = "branch-56" }
+indicatif = "0.18"
+sqllogictest = "0.29.1"
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[[test]]
+name = "sqllogictests"
+harness = false
