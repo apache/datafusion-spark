@@ -1,2 +1,4 @@
 **/LICENSE.txt
 **/NOTICE.txt
+**/.gitignore
+**/rat_exclude_files.txt
