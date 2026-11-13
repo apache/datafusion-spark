@@ -23,16 +23,58 @@
 
 This crate provides Spark-compatible scalar, aggregate, and table functions that can be registered with a DataFusion `SessionContext`.
 
+## Quick start
+
+```toml
+[dependencies]
+datafusion = "56"
+datafusion-spark = { version = "56", features = ["core"] }
+```
+
+Call `with_spark_features` **after** `with_default_features`, since Spark functions replace DataFusion
+functions with the same name:
+
+```rust
+use datafusion::execution::SessionStateBuilder;
+use datafusion::prelude::SessionContext;
+use datafusion_spark::SessionStateBuilderSpark;
+
+let state = SessionStateBuilder::new()
+    .with_default_features()
+    .with_spark_features()
+    .build();
+let ctx = SessionContext::new_with_state(state);
+
+// `sha2` now has Spark semantics
+let df = ctx.sql("SELECT sha2('Spark', 256)").await?;
+```
+
+See the [crate README](crates/spark/README.md) and the [API documentation](https://docs.rs/datafusion-spark)
+for more.
+
 ## Repository layout
 
 - `crates/spark` – the `datafusion-spark` crate
 - `crates/sqllogictest` – SQL logic tests for the Spark functions
+- `.ai/skills` – agent skills for working on this repository (see `AGENTS.md`)
 
 ## Building and testing
 
 ```shell
 cargo build
 cargo test
+```
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for implementation and testing
+guidelines. Before opening a PR, run:
+
+```shell
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test -p datafusion-spark
+cargo test -p datafusion-spark-sqllogictest
 ```
 
 ## License
