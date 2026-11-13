@@ -28,7 +28,7 @@ import time
 import traceback
 from collections import Counter
 from dataclasses import dataclass, field
-from decimal import ROUND_HALF_UP, Decimal, localcontext
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
 from typing import Optional
 
@@ -480,7 +480,7 @@ def _temporal_cast(t: ArrowType, arg: list[tuple[str, str]], arg_sql: str, time_
     if kind == "typed":
         # DataFusion's TIMESTAMP literal has no time zone and Spark's is in the
         # session time zone, so they are the same value only in UTC.
-        if not _is_utc(time_zone):
+        if t.name == "Timestamp" and not _is_utc(time_zone):
             raise Skip(f"arrow_cast of a typed literal to {t.name} in a session time zone other than UTC")
         kind = "string"
         arg_sql = "'" + value.replace("'", "''") + "'"
@@ -564,8 +564,8 @@ def _visible_type(sql: str) -> Optional[str]:
     literal, a cast, or a call to a function that returns a DATE. Otherwise None."""
     tokens = _strip_parens(_tokenize(sql))
     if len(tokens) >= 3 and tokens[-2][0] == "cast":
-        # expr::TYPE
-        return _temporal_name(tokens[-1][1])
+        # expr::TYPE, where `::` applies to the whole of expr
+        return _temporal_name(tokens[-1][1]) if _is_operand(tokens[:-2]) else None
     if len(tokens) == 2 and tokens[1][0] == "string":
         return _temporal_name(tokens[0][1])
     if len(tokens) < 3 or tokens[0][0] != "word" or tokens[1][1] != "(":
@@ -579,6 +579,17 @@ def _visible_type(sql: str) -> Optional[str]:
             return _temporal_name(inner[-1][1])
         return None
     return "DATE" if name in _DATE_FUNCTIONS else None
+
+
+def _is_operand(tokens: list[tuple[str, str]]) -> bool:
+    """Whether tokens are one operand: a single token, or a name followed by a
+    parenthesized group that runs to the end, such as `f(a, b)` or `(a + b)`."""
+    if len(tokens) == 1:
+        return True
+    start = 1 if tokens[0][0] == "word" else 0
+    if start >= len(tokens) or tokens[start][1] != "(":
+        return False
+    return _matching_paren(tokens, start) == len(tokens) - 1
 
 
 def _temporal_name(type_name: str) -> Optional[str]:
@@ -717,6 +728,9 @@ def translate(sql: str, time_zone: str = "UTC") -> str:
         if kind in ("space", "comment"):
             out.append(text)
             continue
+        if kind == "quoted" and text.startswith('"'):
+            # DataFusion reads "x" as an identifier, and Spark as a string.
+            text = "`" + text[1:-1].replace("`", "``") + "`"
         if kind == "word":
             if expect_type:
                 text = _translate_type(tokens, i)
@@ -754,21 +768,6 @@ _DROP_RE = re.compile(
 _AS_RE = re.compile(r"AS\b\s*", re.IGNORECASE)
 
 
-def _split_top_level(text: str) -> list[str]:
-    """Split on commas that are not inside parentheses."""
-    parts, depth, start = [], 0, 0
-    for i, ch in enumerate(text):
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-        elif ch == "," and depth == 0:
-            parts.append(text[start:i])
-            start = i + 1
-    parts.append(text[start:])
-    return [p.strip() for p in parts]
-
-
 def translate_statement(sql: str, time_zone: str = "UTC") -> str:
     """Translate a statement, turning DataFusion tables into Spark temporary views."""
     m = _DROP_RE.match(sql)
@@ -784,19 +783,18 @@ def translate_statement(sql: str, time_zone: str = "UTC") -> str:
     name, rest = m.group(3), sql[m.end() :]
     columns = None
     if rest.startswith("("):
-        depth = 0
-        for end, ch in enumerate(rest):
-            depth += {"(": 1, ")": -1}.get(ch, 0)
-            if depth == 0:
-                break
-        columns = _split_top_level(rest[1:end])
-        rest = rest[end + 1 :].lstrip()
+        tokens = _tokenize(rest)
+        close = _matching_paren(tokens, 0)
+        columns = ["".join(t for _, t in arg).strip() for arg in _call_args(tokens, 0, close)]
+        rest = "".join(t for _, t in tokens[close + 1 :]).lstrip()
     m = _AS_RE.match(rest)
     if not m:
         raise Skip("CREATE TABLE without AS")
     query = rest[m.end() :].rstrip().rstrip(";")
     if columns is None:
         return translate(f"{create} {name} AS {query}", time_zone)
+    # A newline ends a trailing `--` comment, which would hide the `)`.
+    end_comment = "\n" if "--" in query else ""
     names, casts = [], []
     for column in columns:
         parts = column.split(None, 1)
@@ -806,7 +804,7 @@ def translate_statement(sql: str, time_zone: str = "UTC") -> str:
         casts.append(f"CAST({parts[0]} AS {parts[1]}) AS {parts[0]}")
     return translate(
         f"{create} {name} AS SELECT {', '.join(casts)} "
-        f"FROM ({query}) AS __slt_values({', '.join(names)})",
+        f"FROM ({query}{end_comment}) AS __slt_values({', '.join(names)})",
         time_zone,
     )
 
@@ -922,7 +920,8 @@ def _round_float(value: float, single: bool, digits: int) -> str:
     text = _shortest_f32(value) if single else repr(value)
     with localcontext() as ctx:
         ctx.prec = 1000
-        rounded = Decimal(text).quantize(Decimal(1).scaleb(-digits), ROUND_HALF_UP)
+        # BigDecimal::round rounds half to even.
+        rounded = Decimal(text).quantize(Decimal(1).scaleb(-digits), ROUND_HALF_EVEN)
         text = format(rounded.normalize(), "f")
     # BigDecimal has no negative zero.
     return "0" if text == "-0" else text
@@ -1109,6 +1108,21 @@ def localize_timestamps(line: str, time_zone: str) -> str:
     return _ZONED_TIMESTAMP_RE.sub(replace, line)
 
 
+def _localize_expected(lines: list[str], trees: list, time_zone: str) -> list[str]:
+    """Localize the timestamps in expected lines, cell by cell when the line
+    splits into one cell per column, so that a string column is left alone."""
+    is_timestamp = [_contains_timestamp(t) for t in trees]
+    result = []
+    for line in lines:
+        cells = line.split(" ")
+        if len(cells) == len(trees):
+            cells = [localize_timestamps(c, time_zone) if ts else c for c, ts in zip(cells, is_timestamp)]
+            result.append(" ".join(cells))
+        else:
+            result.append(localize_timestamps(line, time_zone))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Comparing results
 # ---------------------------------------------------------------------------
@@ -1125,6 +1139,11 @@ def _sorted(lines: list[str], sort_mode: str) -> list[str]:
 
 def results_match(expected: list[str], actual: list[str], sort_mode: str) -> bool:
     return _sorted(expected, sort_mode) == _sorted(actual, sort_mode)
+
+
+# A number as DataFusion and this runner print one, without leading zeros,
+# underscores or exponents.
+_NUMBER_RE = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d+)?|NaN|-?Infinity")
 
 
 def numeric_difference(expected: list[str], actual: list[str], sort_mode: str) -> Optional[str]:
@@ -1145,10 +1164,9 @@ def numeric_difference(expected: list[str], actual: list[str], sort_mode: str) -
         for e, a in zip(e_values, a_values):
             if e == a:
                 continue
-            try:
-                e_float, a_float = float(e), float(a)
-            except ValueError:
+            if not (_NUMBER_RE.fullmatch(e) and _NUMBER_RE.fullmatch(a)):
                 return None
+            e_float, a_float = float(e), float(a)
             if e_float == a_float:
                 continue
             if not math.isclose(e_float, a_float, rel_tol=1e-12, abs_tol=1e-15):
@@ -1200,6 +1218,8 @@ class SparkRunner:
         # them itself.
         for name in ("SQLQueryContextLogger", "DataFrameQueryContextLogger"):
             PySparkLogger.getLogger(name).disabled = True
+        # Removed when the runner exits.
+        self._warehouse = tempfile.TemporaryDirectory(prefix="pyspark-slt-")
         self._start()
 
     def _start(self) -> None:
@@ -1213,7 +1233,7 @@ class SparkRunner:
             .config("spark.driver.host", "127.0.0.1")
             .config("spark.driver.bindAddress", "127.0.0.1")
             .config("spark.sql.shuffle.partitions", "1")
-            .config("spark.sql.warehouse.dir", tempfile.mkdtemp(prefix="pyspark-slt-"))
+            .config("spark.sql.warehouse.dir", self._warehouse.name)
             # Spark logs every failed query; the runner reports them instead.
             .config("spark.log.level", "FATAL")
         )
@@ -1280,8 +1300,9 @@ class SparkRunner:
             query = _maps_as_entries(df, schema).limit(MAX_ROWS + 1)
             try:
                 rows = query.collect()
-            except TypeError as e:
-                # PySpark returns each MAP as a dict, which cannot have array keys.
+            except (TypeError, ValueError, OverflowError) as e:
+                # For example a MAP with array keys, which a dict cannot hold, or
+                # a date outside the years 1 to 9999 that Python supports.
                 raise SparkError("convert", f"PySpark cannot convert the result ({e})")
             return schema, rows
         except ParseException as e:
@@ -1465,7 +1486,7 @@ def run_record(runner: SparkRunner, record: Record) -> Outcome:
     if not results_match(expected, actual, record.sort_mode) and any(
         _contains_timestamp(t) for t in trees
     ):
-        expected = [localize_timestamps(line, runner.time_zone) for line in expected]
+        expected = _localize_expected(expected, trees, runner.time_zone)
     if results_match(expected, actual, record.sort_mode):
         letters = "".join(type_letter(t) for t in trees)
         if letters != record.types:

@@ -93,6 +93,9 @@ class TranslateTest(unittest.TestCase):
         # An alias named like a type, and text inside a string, stay as they are.
         self.assertEqual(r.translate("SELECT 1 AS text, 'x::TEXT'"), "SELECT 1 AS text, 'x::TEXT'")
 
+    def test_double_quoted_identifiers(self):
+        self.assertEqual(r.translate('SELECT "a" FROM t'), "SELECT `a` FROM t")
+
     def test_values_column_names(self):
         self.assertEqual(
             r.translate("SELECT column1, t.column2, 'column3' FROM t"),
@@ -204,6 +207,8 @@ class TranslateTest(unittest.TestCase):
                 "SELECT CAST(unix_date(DATE '2024-01-01') AS BIGINT)",
             "SELECT arrow_cast(CAST(x AS DATE), 'Int32')": "SELECT unix_date(CAST(x AS DATE))",
             "SELECT arrow_cast('2024-01-01'::DATE, 'Int32')": "SELECT unix_date('2024-01-01'::DATE)",
+            # `::` applies only to b, so the argument is not a date.
+            "SELECT arrow_cast(a = b::DATE, 'Int32')": "SELECT CAST(a = b::DATE AS INT)",
             # Not visibly a date, so it stays a CAST.
             "SELECT arrow_cast(abs(x), 'Int32')": "SELECT CAST(abs(x) AS INT)",
         }
@@ -221,6 +226,11 @@ class TranslateTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(r.Skip, "other than UTC"):
             r.translate("SELECT arrow_cast(1, 'Timestamp(s)')", "Asia/Seoul")
+        # A DATE literal does not depend on the session time zone.
+        self.assertEqual(
+            r.translate("SELECT arrow_cast(DATE '2024-01-01', 'Date32')", "+05:00"),
+            "SELECT CAST('2024-01-01' AS DATE)",
+        )
         # UTC is recognised in any case.
         self.assertEqual(
             r.translate("SELECT arrow_cast(1, 'Timestamp(s)')", "utc"), "SELECT timestamp_seconds(1)"
@@ -261,6 +271,11 @@ class TranslateTest(unittest.TestCase):
             "FROM (VALUES (1, 'a', 1.5)) AS __slt_values(id, val, d)",
         )
         self.assertEqual(r.translate_statement("DROP TABLE t;"), "DROP VIEW t")
+        self.assertEqual(
+            r.translate_statement("CREATE TABLE t (s VARCHAR, d DECIMAL(5, 2)) AS VALUES ('a,b)', 1) -- c"),
+            "CREATE TEMPORARY VIEW t AS SELECT CAST(s AS STRING) AS s, CAST(d AS DECIMAL(5, 2)) AS d "
+            "FROM (VALUES ('a,b)', 1) -- c\n) AS __slt_values(s, d)",
+        )
         self.assertEqual(r.translate_statement("drop table if exists t"), "DROP VIEW IF EXISTS t")
 
     def test_settings(self):
@@ -291,6 +306,9 @@ class FormatTest(unittest.TestCase):
         self.assertEqual(self.cell(0.12345678901234567, double), "0.123456789012346")
         self.assertEqual(self.cell(1e20, double), "100000000000000000000")
         self.assertEqual(self.cell(-0.0, double), "0")
+        # BigDecimal::round rounds half to even.
+        self.assertEqual(self.cell(0.1234567890123445, double), "0.123456789012344")
+        self.assertEqual(self.cell(0.1234567890123455, double), "0.123456789012346")
         self.assertEqual(self.cell(float("nan"), double), "NaN")
         self.assertEqual(self.cell(float("-inf"), double), "-Infinity")
 
@@ -369,6 +387,10 @@ class CompareTest(unittest.TestCase):
         )
         self.assertIsNone(r.numeric_difference(["0.1235"], ["0.1234"], "nosort"))
         self.assertIsNone(r.numeric_difference(["NULL"], ["0"], "nosort"))
+        # Strings that Python's float() accepts are not numbers here.
+        self.assertIsNone(r.numeric_difference(["007"], ["7"], "nosort"))
+        self.assertIsNone(r.numeric_difference(["1_0"], ["10"], "nosort"))
+        self.assertIsNone(r.numeric_difference(["1e3"], ["1000"], "nosort"))
 
 
 def spark_type(name: str, **attributes):
@@ -458,6 +480,14 @@ class RunRecordTest(unittest.TestCase):
         value = datetime.datetime(2024, 7, 15)
         result = (FakeSchema("TimestampType"), [(value,)])
         self.assertEqual(self.outcome("query P\nSELECT ts\n----\n2024-07-15T00:00:00Z\n", result).status, "pass")
+
+    def test_zoned_timestamps_only_in_timestamp_columns(self):
+        value = datetime.datetime(2024, 7, 15)
+        schema = FakeSchema("TimestampType", "StringType")
+        result = (schema, [(value, "2024-07-15T00:00:00")])
+        # The string column keeps its Z, so the difference is reported.
+        sql = "query PT\nSELECT ts, s\n----\n2024-07-15T00:00:00Z 2024-07-15T00:00:00Z\n"
+        self.assertEqual(self.outcome(sql, result).status, "mismatch")
 
     def test_scale(self):
         # Spark reads 1.5 as a DECIMAL, DataFusion as a DOUBLE.
