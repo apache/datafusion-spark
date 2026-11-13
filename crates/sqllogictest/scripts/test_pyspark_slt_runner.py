@@ -329,7 +329,7 @@ class FormatTest(unittest.TestCase):
         tree = ("array", ("double",))
         self.assertEqual(self.cell([1.0, 2.5, None, 1e20, 1e-7], tree), "[1.0, 2.5, NULL, 1e20, 1e-7]")
         tree = ("struct", (("a", ("int",)), ("b", ("map", ("string",), ("boolean",)))))
-        self.assertEqual(self.cell((1, {"x": True}), tree), "{a: 1, b: {x: true}}")
+        self.assertEqual(self.cell((1, [("x", True)]), tree), "{a: 1, b: {x: true}}")
         # Top-level maps arrive from map_entries as (key, value) rows, in Spark's order.
         tree = ("map", ("int",), ("string",))
         self.assertEqual(self.cell([(5, "b"), (2, "a")], tree), "{5: b, 2: a}")

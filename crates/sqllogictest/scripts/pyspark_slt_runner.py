@@ -79,6 +79,9 @@ MAX_ROWS = 1000
 # The most result lines printed for one difference.
 MAX_REPORT_LINES = 20
 
+# The skip reasons the summary lists without --verbose.
+MAX_SKIP_REASONS = 15
+
 
 class Skip(Exception):
     """The record cannot be run on Spark. The message says why."""
@@ -106,6 +109,10 @@ class Record:
     sort_mode: str = "nosort"
     expected: list[str] = field(default_factory=list)
     skip_reason: Optional[str] = None
+
+    @property
+    def location(self) -> str:
+        return f"{_display_path(self.path)}:{self.line}"
 
 
 def parse_slt(path: Path) -> list[Record]:
@@ -355,8 +362,8 @@ _ARROW_UNITS = {
     "ns": "ns",
 }
 
-# Spark's TIME(p) precision for each Arrow time unit. Spark has no nanoseconds.
-_TIME_PRECISION = {"s": 0, "ms": 3, "us": 6}
+# Fractional-second digits each time unit keeps.
+_UNIT_DIGITS = {"s": 0, "ms": 3, "us": 6, "ns": 9}
 
 _UTC_NAMES = {"UTC", "ETC/UTC", "Z", "+00:00", "+00", "+0000", "GMT"}
 
@@ -416,9 +423,9 @@ def spark_type_for_arrow(t: ArrowType) -> str:
         return f"MAP<{spark_type_for_arrow(key.type)}, {spark_type_for_arrow(value.type)}>"
     if name in ("Time32", "Time64"):
         unit = _arrow_unit(t)
-        if unit not in _TIME_PRECISION:
+        if unit == "ns":
             raise Skip("arrow_cast to nanoseconds, which Spark does not have")
-        return f"TIME({_TIME_PRECISION[unit]})"
+        return f"TIME({_UNIT_DIGITS[unit]})"
     if name == "Timestamp":
         unit = _arrow_unit(t)
         if unit != "us" or _arrow_time_zone(t) is not None:
@@ -427,15 +434,22 @@ def spark_type_for_arrow(t: ArrowType) -> str:
     raise Skip(f"arrow_cast to {name}, which Spark does not have")
 
 
+def _unquote(token: tuple[str, str]) -> str:
+    """The text of an SQL string literal token."""
+    return token[1][1:-1].replace("''", "'")
+
+
+def _quote(text: str) -> str:
+    """An SQL string literal for text."""
+    return "'" + text.replace("'", "''") + "'"
+
+
 def _strip_parens(tokens: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """Drop whitespace, comments and parentheses that wrap the whole argument."""
     tokens = [t for t in tokens if t[0] not in ("space", "comment")]
     while len(tokens) >= 2 and tokens[0][1] == "(" and tokens[-1][1] == ")":
-        depth = 0
-        for k, (_, text) in enumerate(tokens):
-            depth += {"(": 1, ")": -1}.get(text, 0)
-            if depth == 0 and k < len(tokens) - 1:
-                return tokens
+        if _matching_paren(tokens, 0) != len(tokens) - 1:
+            return tokens
         tokens = tokens[1:-1]
     return tokens
 
@@ -446,7 +460,7 @@ def _literal(tokens: list[tuple[str, str]]):
     if len(tokens) == 1 and tokens[0][0] == "word" and tokens[0][1].upper() == "NULL":
         return ("null", None)
     if len(tokens) == 1 and tokens[0][0] == "string":
-        return ("string", tokens[0][1][1:-1].replace("''", "'"))
+        return ("string", _unquote(tokens[0]))
     # A typed literal, such as DATE '2024-01-01' or TIMESTAMP '2024-01-01 10:00:00'
     if (
         len(tokens) == 2
@@ -454,7 +468,7 @@ def _literal(tokens: list[tuple[str, str]]):
         and tokens[0][1].upper() in ("DATE", "TIMESTAMP", "TIMESTAMP_NTZ")
         and tokens[1][0] == "string"
     ):
-        return ("typed", tokens[1][1][1:-1].replace("''", "'"))
+        return ("typed", _unquote(tokens[1]))
     sign = 1
     if len(tokens) == 2 and tokens[0][1] in ("-", "+"):
         sign = -1 if tokens[0][1] == "-" else 1
@@ -463,9 +477,6 @@ def _literal(tokens: list[tuple[str, str]]):
         return ("integer", sign * int(tokens[0][1]))
     return (None, None)
 
-
-# Fractional-second digits each timestamp unit keeps.
-_UNIT_DIGITS = {"s": 0, "ms": 3, "us": 6, "ns": 9}
 
 _FRACTION_RE = re.compile(r":\d{2}\.(\d+)")
 
@@ -483,7 +494,7 @@ def _temporal_cast(t: ArrowType, arg: list[tuple[str, str]], arg_sql: str, time_
         if t.name == "Timestamp" and not _is_utc(time_zone):
             raise Skip(f"arrow_cast of a typed literal to {t.name} in a session time zone other than UTC")
         kind = "string"
-        arg_sql = "'" + value.replace("'", "''") + "'"
+        arg_sql = _quote(value)
     if kind is None:
         raise Skip(f"arrow_cast of an expression to {t.name}, which Arrow and Spark convert differently")
     if t.name in ("Date32", "Date64"):
@@ -568,9 +579,8 @@ def _visible_type(sql: str) -> Optional[str]:
         return _temporal_name(tokens[-1][1]) if _is_operand(tokens[:-2]) else None
     if len(tokens) == 2 and tokens[1][0] == "string":
         return _temporal_name(tokens[0][1])
-    if len(tokens) < 3 or tokens[0][0] != "word" or tokens[1][1] != "(":
-        return None
-    if _matching_paren(tokens, 1) != len(tokens) - 1:
+    # A call: a name followed by its arguments.
+    if len(tokens) < 3 or tokens[0][0] != "word" or not _is_operand(tokens):
         return None
     name = tokens[0][1].lower()
     if name == "cast":
@@ -633,7 +643,7 @@ def _type_string(name: str, args: list) -> str:
     type_arg = _strip_parens(args[1])
     if len(type_arg) != 1 or type_arg[0][0] != "string":
         raise Skip(f"{name} to a type that is not a string literal")
-    return type_arg[0][1][1:-1].replace("''", "'")
+    return _unquote(type_arg[0])
 
 
 _ARROW_TEMPORAL_TYPES = ("Date32", "Date64", "Time32", "Time64", "Timestamp")
@@ -647,10 +657,14 @@ def _contains_temporal(t) -> bool:
     return isinstance(field_type, ArrowType) and _contains_temporal(field_type)
 
 
+# Errors from an Arrow type string with an unexpected shape.
+_ARROW_TYPE_ERRORS = (ValueError, TypeError, AttributeError, IndexError)
+
+
 def _arrow_cast(arg: list, arg_sql: str, type_string: str, time_zone: str) -> str:
     try:
         arrow_type = parse_arrow_type(type_string)
-    except (ValueError, TypeError, AttributeError):
+    except _ARROW_TYPE_ERRORS:
         raise Skip("arrow_cast to a type this runner cannot parse")
     if arrow_type.name in _ARROW_TEMPORAL_TYPES:
         return _temporal_cast(arrow_type, arg, arg_sql, time_zone)
@@ -660,7 +674,7 @@ def _arrow_cast(arg: list, arg_sql: str, type_string: str, time_zone: str) -> st
         raise Skip("arrow_cast to a nested date, time or timestamp")
     try:
         spark_type = spark_type_for_arrow(arrow_type)
-    except (ValueError, TypeError, AttributeError, IndexError):
+    except _ARROW_TYPE_ERRORS:
         raise Skip("arrow_cast to a type this runner cannot parse")
     source = _visible_type(arg_sql) if spark_type in _INTEGER_TYPES else None
     if source == "DATE":
@@ -995,8 +1009,12 @@ def zone(name: str) -> datetime.tzinfo:
 
 def _local_timestamp(value: datetime.datetime, time_zone: str) -> str:
     """Spark TIMESTAMP values, which PySpark returns as naive UTC (TZ=UTC)."""
-    utc = value.replace(tzinfo=datetime.timezone.utc)
-    return _naive_timestamp(utc.astimezone(zone(time_zone)).replace(tzinfo=None))
+    return _wall_clock(value.replace(tzinfo=datetime.timezone.utc), time_zone)
+
+
+def _wall_clock(value: datetime.datetime, time_zone: str) -> str:
+    """An aware datetime as wall-clock time in time_zone."""
+    return _naive_timestamp(value.astimezone(zone(time_zone)).replace(tzinfo=None))
 
 
 def format_nested(value, tree: tuple, time_zone: str) -> str:
@@ -1030,11 +1048,10 @@ def format_nested(value, tree: tuple, time_zone: str) -> str:
     if kind == "array":
         return "[" + ", ".join(format_nested(v, tree[1], time_zone) for v in value) + "]"
     if kind == "map":
-        # A dict from PySpark, or a list of (key, value) rows from map_entries.
-        pairs = value.items() if isinstance(value, dict) else ((e[0], e[1]) for e in value)
+        # _maps_as_entries collects each map as a list of (key, value) rows.
         entries = (
             f"{format_nested(k, tree[1], time_zone)}: {format_nested(v, tree[2], time_zone)}"
-            for k, v in pairs
+            for k, v in value
         )
         return "{" + ", ".join(entries) + "}"
     if kind == "struct":
@@ -1102,8 +1119,7 @@ def localize_timestamps(line: str, time_zone: str) -> str:
         micro = int(fraction[:6].ljust(6, "0")) if fraction else 0
         offset = datetime.timezone.utc if m.group(8) == "Z" else zone(m.group(8))
         parts = [int(m.group(g)) for g in range(1, 7)]
-        value = datetime.datetime(*parts, micro, tzinfo=offset)
-        return _naive_timestamp(value.astimezone(zone(time_zone)).replace(tzinfo=None))
+        return _wall_clock(datetime.datetime(*parts, micro, tzinfo=offset), time_zone)
 
     return _ZONED_TIMESTAMP_RE.sub(replace, line)
 
@@ -1308,9 +1324,7 @@ class SparkRunner:
         except ParseException as e:
             raise SparkError("parse", f"Spark cannot parse it ({_condition(e)})")
         except PySparkException as e:
-            if "OutOfMemoryError" in str(e):
-                self.broken = True
-                raise SparkError("memory", "Spark ran out of memory")
+            self._check_memory(str(e))
             m = re.search(r"(\w+Type)\.fromInternal is not implemented", str(e))
             if m:
                 raise SparkError("convert", f"Spark returned a {m.group(1)} value")
@@ -1320,14 +1334,15 @@ class SparkRunner:
                 raise SparkError("function", f"Spark has no function {name}")
             if condition == "TABLE_OR_VIEW_NOT_FOUND":
                 raise SparkError("table", "needs a table that Spark could not create")
-            message = str(e).strip().split("\n")[0]
-            raise SparkError("error", message)
+            raise SparkError("error", _first_line(e))
         except Py4JJavaError as e:
-            message = str(e.java_exception)
-            if "OutOfMemoryError" in message:
-                self.broken = True
-                raise SparkError("memory", "Spark ran out of memory")
-            raise SparkError("error", message.strip().split("\n")[0])
+            self._check_memory(str(e.java_exception))
+            raise SparkError("error", _first_line(e.java_exception))
+
+    def _check_memory(self, message: str) -> None:
+        if "OutOfMemoryError" in message:
+            self.broken = True
+            raise SparkError("memory", "Spark ran out of memory")
 
 
 def _maps_as_entries(df, schema):
@@ -1521,7 +1536,7 @@ def _indent(lines, prefix: str = "    ") -> str:
 
 def report(outcome: Outcome, spark_version: str) -> str:
     record = outcome.record
-    location = f"{_display_path(record.path)}:{record.line}"
+    location = record.location
     if outcome.status == "skip":
         return f"{location}: skipped: {outcome.detail}"
     if outcome.status == "pass":
@@ -1589,10 +1604,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         if statuses[status]:
             print(f"  {statuses[status]:6d}  {description}")
     print(f"  {statuses['skip']:6d}  skipped")
-    for reason, count in skip_reasons.most_common(15):
+    for reason, count in skip_reasons.most_common(MAX_SKIP_REASONS):
         print(f"  {count:14d}  {reason}")
-    if len(skip_reasons) > 15:
-        print(f"  {'':>14}  ... {len(skip_reasons) - 15} more reasons (use --verbose)")
+    if len(skip_reasons) > MAX_SKIP_REASONS:
+        more = len(skip_reasons) - MAX_SKIP_REASONS
+        print(f"  {'':>14}  ... {more} more reasons (use --verbose)")
     if stopped:
         print(f"\nStopped early: {stopped}")
         return 2
@@ -1641,7 +1657,6 @@ def run_files(runner, files: list[Path], verbose: bool = False):
             return statuses, skip_reasons, stopped
         broken = False
         for record in parse_slt(path):
-            location = f"{_display_path(record.path)}:{record.line}"
             if broken:
                 # A new session would not have this file's views and settings.
                 outcome = Outcome(record, "skip", "Spark failed earlier in the file")
@@ -1651,7 +1666,7 @@ def run_files(runner, files: list[Path], verbose: bool = False):
                 except Exception as e:
                     if _session_died(e):
                         broken = True
-                        print(f"{location}: the Spark session died, skipping the rest of the file\n")
+                        print(f"{record.location}: the Spark session died, skipping the rest of the file\n")
                         outcome = Outcome(record, "skip", "the Spark session died while running it")
                     else:
                         # A bug in this runner must never look like Spark behavior.
@@ -1659,7 +1674,7 @@ def run_files(runner, files: list[Path], verbose: bool = False):
                         outcome = Outcome(record, "runner-error", detail)
                 if not broken and getattr(runner, "broken", False):
                     broken = True
-                    print(f"{location}: Spark ran out of memory, skipping the rest of the file\n")
+                    print(f"{record.location}: Spark ran out of memory, skipping the rest of the file\n")
             statuses[outcome.status] += 1
             if outcome.status == "skip":
                 skip_reasons[outcome.detail] += 1
