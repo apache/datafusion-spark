@@ -5,22 +5,18 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use arrow::array::{
-    Array, ArrayRef, MapBuilder, MapFieldNames, StringArrayType, StringBuilder,
-};
+use arrow::array::{Array, ArrayRef, MapBuilder, MapFieldNames, StringArrayType, StringBuilder};
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::{DataType, Field, FieldRef};
-use datafusion_common::cast::{
-    as_large_string_array, as_string_array, as_string_view_array,
-};
+use datafusion_common::cast::{as_large_string_array, as_string_array, as_string_view_array};
 use datafusion_common::{Result, exec_err, internal_err};
 use datafusion_expr::{
-    ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl, Signature,
-    TypeSignature, Volatility,
+    ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl, Signature, TypeSignature,
+    Volatility,
 };
 
 use crate::function::map::utils::map_type_from_key_value_types;
-use datafusion_common::config::MapKeyDedupPolicy;
+use crate::{MapKeyDedupPolicy, SparkOptions};
 
 const DEFAULT_PAIR_DELIM: &str = ",";
 const DEFAULT_KV_DELIM: &str = ":";
@@ -37,7 +33,7 @@ const DEFAULT_KV_DELIM: &str = ":";
 ///
 /// # Duplicate Key Handling
 /// Mirrors Spark's [`spark.sql.mapKeyDedupPolicy`](https://github.com/apache/spark/blob/v4.0.0/sql/catalyst/src/main/scala/org/apache/spark/sql/internal/SQLConf.scala#L4502-L4511),
-/// wired through DataFusion's `datafusion.spark.map_key_dedup_policy`:
+/// wired through DataFusion Spark's `spark.map_key_dedup_policy`:
 /// - `EXCEPTION` (default): error on duplicate keys.
 /// - `LAST_WIN`: keep the last occurrence of each duplicate key.
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -89,8 +85,11 @@ impl ScalarUDFImpl for SparkStrToMap {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        let last_value_wins =
-            args.config_options.spark.map_key_dedup_policy == MapKeyDedupPolicy::LastWin;
+        let last_value_wins = args
+            .config_options
+            .extensions
+            .get::<SparkOptions>()
+            .is_some_and(|options| options.map_key_dedup_policy == MapKeyDedupPolicy::LastWin);
         let arrays: Vec<ArrayRef> = ColumnarValue::values_to_arrays(&args.args)?;
         let result = str_to_map_inner(&arrays, last_value_wins)?;
         Ok(ColumnarValue::Array(result))
@@ -109,12 +108,9 @@ fn str_to_map_inner(args: &[ArrayRef], last_value_wins: bool) -> Result<ArrayRef
                 None,
                 last_value_wins,
             ),
-            DataType::Utf8View => str_to_map_impl(
-                as_string_view_array(&args[0])?,
-                None,
-                None,
-                last_value_wins,
-            ),
+            DataType::Utf8View => {
+                str_to_map_impl(as_string_view_array(&args[0])?, None, None, last_value_wins)
+            }
             other => exec_err!(
                 "Unsupported data type {other:?} for str_to_map, \
                 expected Utf8, LargeUtf8, or Utf8View"
@@ -155,22 +151,18 @@ fn str_to_map_inner(args: &[ArrayRef], last_value_wins: bool) -> Result<ArrayRef
                 Some(as_string_array(&args[2])?),
                 last_value_wins,
             ),
-            (DataType::LargeUtf8, DataType::LargeUtf8, DataType::LargeUtf8) => {
-                str_to_map_impl(
-                    as_large_string_array(&args[0])?,
-                    Some(as_large_string_array(&args[1])?),
-                    Some(as_large_string_array(&args[2])?),
-                    last_value_wins,
-                )
-            }
-            (DataType::Utf8View, DataType::Utf8View, DataType::Utf8View) => {
-                str_to_map_impl(
-                    as_string_view_array(&args[0])?,
-                    Some(as_string_view_array(&args[1])?),
-                    Some(as_string_view_array(&args[2])?),
-                    last_value_wins,
-                )
-            }
+            (DataType::LargeUtf8, DataType::LargeUtf8, DataType::LargeUtf8) => str_to_map_impl(
+                as_large_string_array(&args[0])?,
+                Some(as_large_string_array(&args[1])?),
+                Some(as_large_string_array(&args[2])?),
+                last_value_wins,
+            ),
+            (DataType::Utf8View, DataType::Utf8View, DataType::Utf8View) => str_to_map_impl(
+                as_string_view_array(&args[0])?,
+                Some(as_string_view_array(&args[1])?),
+                Some(as_string_view_array(&args[2])?),
+                last_value_wins,
+            ),
             (t1, t2, t3) => exec_err!(
                 "Unsupported data types ({t1:?}, {t2:?}, {t3:?}) for str_to_map, \
                 expected matching Utf8, LargeUtf8, or Utf8View"
@@ -221,8 +213,7 @@ fn str_to_map_impl<'a, V: StringArrayType<'a> + Copy>(
         }
 
         // Per-row delimiter extraction
-        let pair_delim =
-            pair_delim_array.map_or(DEFAULT_PAIR_DELIM, |a| a.value(row_idx));
+        let pair_delim = pair_delim_array.map_or(DEFAULT_PAIR_DELIM, |a| a.value(row_idx));
         let kv_delim = kv_delim_array.map_or(DEFAULT_KV_DELIM, |a| a.value(row_idx));
 
         let text = text_array.value(row_idx);
@@ -275,7 +266,7 @@ fn str_to_map_impl<'a, V: StringArrayType<'a> + Copy>(
                         "[DUPLICATED_MAP_KEY] Duplicate map key '{key}' was found, \
                          please check the input data. To allow duplicate keys with \
                          last-value-wins semantics, set \
-                         `datafusion.spark.map_key_dedup_policy` to `LAST_WIN`."
+                         `spark.map_key_dedup_policy` to `LAST_WIN`."
                     );
                 }
 

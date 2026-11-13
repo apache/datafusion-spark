@@ -8,15 +8,14 @@ use crate::function::map::utils::{
     get_list_offsets, get_list_values, map_from_keys_values_offsets_nulls,
     map_type_from_key_value_types,
 };
+use crate::{MapKeyDedupPolicy, SparkOptions};
 use arrow::array::{Array, ArrayRef, NullBufferBuilder, StructArray};
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::{DataType, Field, FieldRef};
-use datafusion_common::config::MapKeyDedupPolicy;
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, exec_err, internal_err};
 use datafusion_expr::{
-    ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl, Signature,
-    Volatility,
+    ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
 };
 use datafusion_functions::utils::make_scalar_function;
 
@@ -59,18 +58,15 @@ impl ScalarUDFImpl for MapFromEntries {
             return exec_err!("map_from_entries: expected one argument");
         };
 
-        let (entries_element_field, entries_element_type) =
-            match entries_field.data_type() {
-                DataType::List(field)
-                | DataType::LargeList(field)
-                | DataType::FixedSizeList(field, _) => {
-                    Ok((field.as_ref(), field.data_type()))
-                }
-                wrong_type => exec_err!(
-                    "map_from_entries: expected array<struct<key, value>>, got {:?}",
-                    wrong_type
-                ),
-            }?;
+        let (entries_element_field, entries_element_type) = match entries_field.data_type() {
+            DataType::List(field)
+            | DataType::LargeList(field)
+            | DataType::FixedSizeList(field, _) => Ok((field.as_ref(), field.data_type())),
+            wrong_type => exec_err!(
+                "map_from_entries: expected array<struct<key, value>>, got {:?}",
+                wrong_type
+            ),
+        }?;
 
         let (keys_type, values_type) = match entries_element_type {
             DataType::Struct(fields) if fields.len() == 2 => {
@@ -89,8 +85,11 @@ impl ScalarUDFImpl for MapFromEntries {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        let last_value_wins =
-            args.config_options.spark.map_key_dedup_policy == MapKeyDedupPolicy::LastWin;
+        let last_value_wins = args
+            .config_options
+            .extensions
+            .get::<SparkOptions>()
+            .is_some_and(|options| options.map_key_dedup_policy == MapKeyDedupPolicy::LastWin);
         make_scalar_function(
             move |args: &[ArrayRef]| map_from_entries_inner(args, last_value_wins),
             vec![],
@@ -103,14 +102,13 @@ fn map_from_entries_inner(args: &[ArrayRef], last_value_wins: bool) -> Result<Ar
     let entries_offsets = get_list_offsets(entries)?;
     let entries_values = get_list_values(entries)?;
 
-    let (flat_keys, flat_values) =
-        match entries_values.as_any().downcast_ref::<StructArray>() {
-            Some(a) => Ok((a.column(0), a.column(1))),
-            None => exec_err!(
-                "map_from_entries: expected array<struct<key, value>>, got {:?}",
-                entries_values.data_type()
-            ),
-        }?;
+    let (flat_keys, flat_values) = match entries_values.as_any().downcast_ref::<StructArray>() {
+        Some(a) => Ok((a.column(0), a.column(1))),
+        None => exec_err!(
+            "map_from_entries: expected array<struct<key, value>>, got {:?}",
+            entries_values.data_type()
+        ),
+    }?;
 
     let entries_with_nulls = entries_values.nulls().and_then(|entries_inner_nulls| {
         let mut builder = NullBufferBuilder::new_with_len(0);
@@ -165,8 +163,7 @@ mod tests {
     #[test]
     fn test_map_from_entries_nullability_matches_input() {
         let func = MapFromEntries::new();
-        let expected_type =
-            map_type_from_key_value_types(&DataType::Int32, &DataType::Utf8);
+        let expected_type = map_type_from_key_value_types(&DataType::Int32, &DataType::Utf8);
 
         // Non-nullable array and elements => non-nullable result
         let non_nullable_field = make_entries_field(false, false);

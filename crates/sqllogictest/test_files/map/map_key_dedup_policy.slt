@@ -1,0 +1,16 @@
+# Spark map construction uses EXCEPTION by default.
+statement ok
+set spark.map_key_dedup_policy = 'LAST_WIN';
+
+query ?
+SELECT map_from_arrays(array(1, 2, 1), array('a', 'b', 'c'));
+----
+{2: b, 1: c}
+
+statement ok
+set spark.map_key_dedup_policy = 'EXCEPTION';
+
+statement error
+set spark.map_key_dedup_policy = 'BOGUS';
+----
+DataFusion error: Invalid or Unsupported Configuration: Invalid MapKeyDedupPolicy: BOGUS. Expected one of: EXCEPTION, LAST_WIN

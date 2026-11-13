@@ -115,8 +115,11 @@
 //! Then use the extension trait - see [`SessionStateBuilderSpark::with_spark_features`]
 //! for an example.
 
+pub mod config;
 pub mod function;
 pub mod planner;
+
+pub use config::{MapKeyDedupPolicy, SparkOptions};
 
 #[cfg(feature = "core")]
 mod session_state;

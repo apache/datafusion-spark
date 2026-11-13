@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use datafusion::execution::SessionStateBuilder;
 
+use crate::SparkOptions;
 use crate::planner::SparkFunctionPlanner;
 use crate::{
-    all_default_aggregate_functions, all_default_scalar_functions,
-    all_default_table_functions, all_default_window_functions,
+    all_default_aggregate_functions, all_default_scalar_functions, all_default_table_functions,
+    all_default_window_functions,
 };
 
 /// Extension trait for adding Apache Spark features to [`SessionStateBuilder`].
@@ -42,6 +43,12 @@ pub trait SessionStateBuilderSpark {
 
 impl SessionStateBuilderSpark for SessionStateBuilder {
     fn with_spark_features(mut self) -> Self {
+        self.config()
+            .get_or_insert_with(Default::default)
+            .options_mut()
+            .extensions
+            .insert(SparkOptions::default());
+
         self.expr_planners()
             .get_or_insert_with(Vec::new)
             // planners are evaluated in order of insertion. Push Apache Spark function planner to the front
@@ -82,6 +89,15 @@ mod tests {
     #[test]
     fn test_session_state_with_spark_features() {
         let state = SessionStateBuilder::new().with_spark_features().build();
+
+        assert!(
+            state
+                .config_options()
+                .extensions
+                .get::<SparkOptions>()
+                .is_some(),
+            "Spark options should be registered"
+        );
 
         assert!(
             state.scalar_functions().contains_key("sha2"),
