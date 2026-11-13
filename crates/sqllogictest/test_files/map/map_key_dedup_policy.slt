@@ -5,7 +5,7 @@ set spark.map_key_dedup_policy = 'LAST_WIN';
 query ?
 SELECT map_from_arrays(array(1, 2, 1), array('a', 'b', 'c'));
 ----
-{2: b, 1: c}
+{1: c, 2: b}
 
 statement ok
 set spark.map_key_dedup_policy = 'EXCEPTION';

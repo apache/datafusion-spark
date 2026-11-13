@@ -149,6 +149,6 @@ set spark.map_key_dedup_policy = 'EXCEPTION';
 statement error
 set spark.map_key_dedup_policy = 'BOGUS';
 ----
-DataFusion error: Error setting config spark.map_key_dedup_policy
+DataFusion error: Invalid or Unsupported Configuration: Invalid MapKeyDedupPolicy: BOGUS. Expected one of: EXCEPTION, LAST_WIN
 caused by
 Invalid or Unsupported Configuration: Invalid MapKeyDedupPolicy: BOGUS. Expected one of: EXCEPTION, LAST_WIN
