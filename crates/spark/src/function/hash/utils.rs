@@ -11,23 +11,26 @@
 //! Ported from Apache DataFusion Comet:
 //! <https://github.com/apache/datafusion-comet/blob/main/native/spark-expr/src/hash_funcs/utils.rs>
 
-use arrow::array::{Array, PrimitiveArray};
-use arrow::datatypes::ArrowPrimitiveType;
+use std::sync::Arc;
+
+use arrow::array::{Array, ArrayRef, DictionaryArray, PrimitiveArray};
+use arrow::compute::take;
+use arrow::datatypes::{ArrowDictionaryKeyType, ArrowNativeType, ArrowPrimitiveType};
 use datafusion_common::Result;
 
 /// Hash the values of a primitive array, calling `transform` to convert each
 /// value into a byte slice before feeding it to `hash_method`.
 #[inline]
-pub(crate) fn hash_primitive_values<P, F, B, H>(
+pub(crate) fn hash_primitive_values<T: Copy, P, F, B, H>(
     array: &PrimitiveArray<P>,
-    hashes: &mut [u64],
+    hashes: &mut [T],
     transform: F,
     hash_method: H,
 ) where
     P: ArrowPrimitiveType,
     F: Fn(P::Native) -> B,
     B: AsRef<[u8]>,
-    H: Fn(B, u64) -> u64,
+    H: Fn(B, T) -> T,
 {
     let values = array.values();
     if array.null_count() == 0 {
@@ -48,17 +51,17 @@ pub(crate) fn hash_primitive_values<P, F, B, H>(
 /// Hash an array by calling `value_at(array, i)` to produce a byte slice for
 /// each non-null row. Used for byte-slice arrays (Utf8/Binary/FixedSizeBinary
 /// and their Large/View variants) and for arrays whose values need a small
-/// transform (e.g. booleans widened to `i32`, decimals to `i128` bytes).
+/// transform (e.g. booleans widened to `i32`).
 #[inline]
-pub(crate) fn hash_bytes_values<A, B, H>(
+pub(crate) fn hash_bytes_values<T: Copy, A, B, H>(
     array: &A,
-    hashes: &mut [u64],
+    hashes: &mut [T],
     value_at: impl Fn(&A, usize) -> B,
     hash_method: H,
 ) where
     A: Array,
     B: AsRef<[u8]>,
-    H: Fn(B, u64) -> u64,
+    H: Fn(B, T) -> T,
 {
     if array.null_count() == 0 {
         for (i, hash) in hashes.iter_mut().enumerate() {
@@ -76,16 +79,16 @@ pub(crate) fn hash_bytes_values<A, B, H>(
 /// Fallible variant of [`hash_bytes_values`]: `value_at` may return an error
 /// (used by the small-decimal path, where values may not fit in `i64`).
 #[inline]
-pub(crate) fn try_hash_bytes_values<A, B, H>(
+pub(crate) fn try_hash_bytes_values<T: Copy, A, B, H>(
     array: &A,
-    hashes: &mut [u64],
+    hashes: &mut [T],
     value_at: impl Fn(&A, usize) -> Result<B>,
     hash_method: H,
 ) -> Result<()>
 where
     A: Array,
     B: AsRef<[u8]>,
-    H: Fn(B, u64) -> u64,
+    H: Fn(B, T) -> T,
 {
     if array.null_count() == 0 {
         for (i, hash) in hashes.iter_mut().enumerate() {
@@ -99,6 +102,67 @@ where
         }
     }
     Ok(())
+}
+
+/// Hash a dictionary array by delegating to `recurse`, the hash function's own
+/// array-hashing entry point.
+///
+/// When `seeds_are_pristine` (every row still carries the same running hash),
+/// each dictionary value is hashed once and looked up per key. Otherwise the
+/// dictionary is expanded so each row is hashed from its own running hash.
+/// Null keys leave the running hash unchanged, like any other NULL.
+pub(crate) fn hash_dictionary_values<K: ArrowDictionaryKeyType, T: Copy>(
+    array: &ArrayRef,
+    hashes: &mut [T],
+    seeds_are_pristine: bool,
+    recurse: impl Fn(&[ArrayRef], &mut [T]) -> Result<()>,
+) -> Result<()> {
+    let dict_array = array.as_any().downcast_ref::<DictionaryArray<K>>().unwrap();
+    if !seeds_are_pristine {
+        let unpacked = take(dict_array.values().as_ref(), dict_array.keys(), None)?;
+        return recurse(&[unpacked], hashes);
+    }
+    let dict_values = Arc::clone(dict_array.values());
+    // Every row has the same running hash here, so seed the values with it.
+    // `hashes` is non-empty whenever there is a non-null key to look up.
+    let Some(&seed) = hashes.first() else {
+        return Ok(());
+    };
+    let mut dict_hashes = vec![seed; dict_values.len()];
+    recurse(&[dict_values], &mut dict_hashes)?;
+    for (hash, key) in hashes.iter_mut().zip(dict_array.keys().iter()) {
+        if let Some(key) = key {
+            *hash = dict_hashes[key.as_usize()];
+        }
+    }
+    Ok(())
+}
+
+/// The minimal big-endian two's complement bytes of an `i128`, matching Java's
+/// `BigInteger.toByteArray()` (which Spark hashes for decimals with precision
+/// greater than 18).
+pub(crate) struct DecimalBytes {
+    bytes: [u8; 16],
+    start: usize,
+}
+
+impl AsRef<[u8]> for DecimalBytes {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes[self.start..]
+    }
+}
+
+/// Encode `value` like Java's `BigInteger.toByteArray()`: big-endian, dropping
+/// leading bytes that only repeat the sign while keeping one sign bit.
+#[inline]
+pub(crate) fn decimal_unscaled_bytes(value: i128) -> DecimalBytes {
+    let sign_bits = value.leading_zeros().max(value.leading_ones());
+    let start = (sign_bits.saturating_sub(1) / 8) as usize;
+    DecimalBytes {
+        bytes: value.to_be_bytes(),
+        start,
+    }
 }
 
 /// Downcast `$column` to `$array_type`, panicking with a useful error if the
@@ -217,16 +281,18 @@ macro_rules! hash_array_small_decimal {
     };
 }
 
-/// Hash a wide decimal array using the raw 128-bit byte representation.
+/// Hash a wide (precision > 18) decimal array the way Spark does: by hashing
+/// `unscaledValue().toByteArray()`, the minimal big-endian two's complement
+/// encoding of the unscaled value (see [`decimal_unscaled_bytes`]).
 #[macro_export]
 #[doc(hidden)]
 macro_rules! hash_array_decimal {
     ($array_type:ident, $column:ident, $hashes:ident, $hash_method:ident) => {
         let array = $crate::downcast_array!($column, $array_type);
-        $crate::function::hash::utils::hash_bytes_values(
+        $crate::function::hash::utils::hash_primitive_values(
             array,
             $hashes,
-            |a, i| a.value(i).to_le_bytes(),
+            $crate::function::hash::utils::decimal_unscaled_bytes,
             $hash_method,
         );
     };
