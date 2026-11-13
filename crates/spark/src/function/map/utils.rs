@@ -3,15 +3,15 @@
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use arrow::array::Int32Array;
 use arrow::array::{Array, ArrayRef, AsArray, BooleanBuilder, MapArray, StructArray};
 use arrow::buffer::{NullBuffer, OffsetBuffer};
-use arrow::compute::filter;
+use arrow::compute::{filter, take};
 use arrow::datatypes::{DataType, Field, Fields};
 use datafusion_common::{Result, ScalarValue, exec_datafusion_err, exec_err};
-
 /// Helper function to get element [`DataType`]
 /// from [`List`](DataType::List)/[`LargeList`](DataType::LargeList)/[`FixedSizeList`](DataType::FixedSizeList)<br>
 /// [`Null`](DataType::Null) can be coerced to `ListType`([`Null`](DataType::Null)), so [`Null`](DataType::Null) is returned<br>
@@ -167,8 +167,18 @@ fn map_deduplicate_keys(
     let mut new_last_offset = 0;
     new_offsets.push(new_last_offset);
 
+    // Mirror Spark's `ArrayBasedMapBuilder`: the first occurrence of a key
+    // fixes its position in the output; under LAST_WIN a later duplicate
+    // overwrites that slot's value. `keys_mask` selects the first-seen keys
+    // and has one bit per key entry of the input rows, so bit 0 corresponds to
+    // `flat_keys[first_keys_offset]`. `value_indices` records the source index
+    // in `flat_values` to materialize for each output slot (updated in place
+    // on overwrite).
     let mut keys_mask_builder = BooleanBuilder::new();
-    let mut values_mask_builder = BooleanBuilder::new();
+    let mut value_indices: Vec<i32> = Vec::with_capacity(
+        keys_offsets.last().map_or(0, |offset| *offset as usize) - first_keys_offset,
+    );
+    let mut key_to_output_idx: HashMap<ScalarValue, usize> = HashMap::new();
     for (row_idx, (next_keys_offset, next_values_offset)) in keys_offsets
         .iter()
         .zip(values_offsets.iter())
@@ -187,52 +197,47 @@ fn map_deduplicate_keys(
                     "map_deduplicate_keys: keys and values lists in the same row must have equal lengths"
                 );
             }
-            if num_keys_entries != 0 {
-                let mut seen_keys = HashSet::new();
-                let mut keys_mask_one = vec![false; num_keys_entries];
-                let mut values_mask_one = vec![false; num_values_entries];
-                for cur_entry_idx in (0..num_keys_entries).rev() {
-                    let key =
-                        ScalarValue::try_from_array(&flat_keys, cur_keys_offset + cur_entry_idx)?
-                            .compacted();
-                    if seen_keys.contains(&key) {
-                        if !last_value_wins {
-                            return exec_err!(
-                                "[DUPLICATED_MAP_KEY] Duplicate map key {key} was found, \
-                                 please check the input data. To allow duplicate keys with \
-                                 last-value-wins semantics, set \
-                                 `spark.map_key_dedup_policy` to `LAST_WIN`."
-                            );
-                        }
-                    } else {
-                        keys_mask_one[cur_entry_idx] = true;
-                        values_mask_one[cur_entry_idx] = true;
-                        seen_keys.insert(key);
-                        new_last_offset += 1;
+            key_to_output_idx.clear();
+            for cur_entry_idx in 0..num_keys_entries {
+                let key = ScalarValue::try_from_array(&flat_keys, cur_keys_offset + cur_entry_idx)?
+                    .compacted();
+                let abs_value_idx = (cur_values_offset + cur_entry_idx) as i32;
+
+                if let Some(&output_idx) = key_to_output_idx.get(&key) {
+                    if last_value_wins {
+                        value_indices[output_idx] = abs_value_idx;
+                        keys_mask_builder.append_value(false);
+                        continue;
                     }
+                    return exec_err!(
+                        "[DUPLICATED_MAP_KEY] Duplicate map key {key} was found, \
+                         please check the input data. To allow duplicate keys with \
+                         last-value-wins semantics, set \
+                         `datafusion.spark.map_key_dedup_policy` to `LAST_WIN`."
+                    );
                 }
-                keys_mask_builder.append_array(&keys_mask_one.into());
-                values_mask_builder.append_array(&values_mask_one.into());
+                keys_mask_builder.append_value(true);
+                key_to_output_idx.insert(key, value_indices.len());
+                value_indices.push(abs_value_idx);
+                new_last_offset += 1;
             }
         } else {
-            let keys_mask_one = vec![false; num_keys_entries];
-            let values_mask_one = vec![false; num_values_entries];
-            keys_mask_builder.append_array(&keys_mask_one.into());
-            values_mask_builder.append_array(&values_mask_one.into());
+            // The result entry is NULL — no keys/values emitted. Still pad the
+            // mask so it stays aligned with the key entries of later rows.
+            keys_mask_builder.append_n(num_keys_entries, false);
         }
         new_offsets.push(new_last_offset);
         cur_keys_offset += num_keys_entries;
         cur_values_offset += num_values_entries;
     }
     let keys_mask = keys_mask_builder.finish();
+    // Every key entry of the input rows must have exactly one mask bit;
+    // otherwise the mask selects the wrong keys for all later rows.
+    debug_assert_eq!(keys_mask.len(), cur_keys_offset - first_keys_offset);
     let input_keys = flat_keys.slice(first_keys_offset, keys_mask.len());
     let needed_keys = filter(&input_keys, &keys_mask)?;
-    let values_mask = values_mask_builder.finish();
-    let input_values = flat_values.slice(
-        values_offsets.first().map_or(0, |offset| *offset as usize),
-        values_mask.len(),
-    );
-    let needed_values = filter(&input_values, &values_mask)?;
+    let value_indices_array = Int32Array::from(value_indices);
+    let needed_values = take(&flat_values, &value_indices_array, None)?;
     let offsets = OffsetBuffer::new(new_offsets.into());
     Ok((needed_keys, needed_values, offsets))
 }
