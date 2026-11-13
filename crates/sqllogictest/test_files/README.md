@@ -72,4 +72,4 @@ SELECT expm1(a) FROM (VALUES (0::INT), (1::INT)) AS t(a);
 ## Checking the expected results against Spark
 
 The expected results in these files come from DataFusion. To compare them with
-Apache Spark, see the [PySpark runner](../../spark/scripts/README.md).
+Apache Spark, see the [PySpark runner](../scripts/README.md).

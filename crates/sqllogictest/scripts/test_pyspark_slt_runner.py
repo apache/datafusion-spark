@@ -186,6 +186,10 @@ class TranslateTest(unittest.TestCase):
                 "time zone other than the session's",
             "SELECT arrow_cast(19716, 'Date64')": "whole days",
             "SELECT arrow_cast(52245, 'Time32(Second)')": "Spark cannot cast",
+            "SELECT arrow_cast(make_array(1, 2), 'List(Date32)')": "nested date",
+            "SELECT arrow_cast(s, 'Struct(a Timestamp(Microsecond, None))')": "nested date",
+            "SELECT arrow_cast(TIMESTAMP '2024-01-01 00:00:01', 'Int64')": "counts Arrow's time unit",
+            "SELECT arrow_cast(CAST(x AS TIMESTAMP), 'Int64')": "counts Arrow's time unit",
         }
         for sql, reason in cases.items():
             with self.subTest(sql=sql):
@@ -199,6 +203,7 @@ class TranslateTest(unittest.TestCase):
             "SELECT arrow_cast(DATE '2024-01-01', 'Int64')":
                 "SELECT CAST(unix_date(DATE '2024-01-01') AS BIGINT)",
             "SELECT arrow_cast(CAST(x AS DATE), 'Int32')": "SELECT unix_date(CAST(x AS DATE))",
+            "SELECT arrow_cast('2024-01-01'::DATE, 'Int32')": "SELECT unix_date('2024-01-01'::DATE)",
             # Not visibly a date, so it stays a CAST.
             "SELECT arrow_cast(abs(x), 'Int32')": "SELECT CAST(abs(x) AS INT)",
         }
@@ -216,6 +221,10 @@ class TranslateTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(r.Skip, "other than UTC"):
             r.translate("SELECT arrow_cast(1, 'Timestamp(s)')", "Asia/Seoul")
+        # UTC is recognised in any case.
+        self.assertEqual(
+            r.translate("SELECT arrow_cast(1, 'Timestamp(s)')", "utc"), "SELECT timestamp_seconds(1)"
+        )
 
     def test_spark_cast(self):
         cases = {
@@ -235,17 +244,23 @@ class TranslateTest(unittest.TestCase):
     def test_create_table(self):
         self.assertEqual(
             r.translate_statement("CREATE TABLE t AS VALUES (1, 'a')"),
-            "CREATE OR REPLACE TEMPORARY VIEW t AS VALUES (1, 'a')",
+            "CREATE TEMPORARY VIEW t AS VALUES (1, 'a')",
         )
+        self.assertEqual(
+            r.translate_statement("CREATE OR REPLACE TABLE t AS VALUES (1)"),
+            "CREATE OR REPLACE TEMPORARY VIEW t AS VALUES (1)",
+        )
+        with self.assertRaisesRegex(r.Skip, "IF NOT EXISTS"):
+            r.translate_statement("CREATE TABLE IF NOT EXISTS t AS VALUES (1)")
         self.assertEqual(
             r.translate_statement(
                 "CREATE TABLE t (id int, val TEXT, d decimal(10,3)) AS VALUES (1, 'a', 1.5);"
             ),
-            "CREATE OR REPLACE TEMPORARY VIEW t AS SELECT CAST(id AS int) AS id, "
+            "CREATE TEMPORARY VIEW t AS SELECT CAST(id AS int) AS id, "
             "CAST(val AS STRING) AS val, CAST(d AS decimal(10,3)) AS d "
             "FROM (VALUES (1, 'a', 1.5)) AS __slt_values(id, val, d)",
         )
-        self.assertEqual(r.translate_statement("DROP TABLE t;"), "DROP VIEW IF EXISTS t")
+        self.assertEqual(r.translate_statement("DROP TABLE t;"), "DROP VIEW t")
         self.assertEqual(r.translate_statement("drop table if exists t"), "DROP VIEW IF EXISTS t")
 
     def test_settings(self):
@@ -317,6 +332,10 @@ class FormatTest(unittest.TestCase):
         utc = datetime.datetime(2024, 1, 2, 3, 4, 5, 123456)
         self.assertEqual(self.cell(utc, ("timestamp",), "Asia/Seoul"), "2024-01-02T12:04:05.123456")
         self.assertEqual(self.cell(utc, ("timestamp",), "-01:30"), "2024-01-02T01:34:05.123456")
+        self.assertEqual(self.cell(utc, ("timestamp",), "+05"), "2024-01-02T08:04:05.123456")
+        self.assertEqual(self.cell(utc, ("timestamp",), "utc"), "2024-01-02T03:04:05.123456")
+        with self.assertRaises(r.Unsupported):
+            self.cell(utc, ("timestamp",), "Not/AZone")
         self.assertEqual(self.cell(datetime.date(2024, 1, 2), ("date",)), "2024-01-02")
 
     def test_localize_timestamps(self):

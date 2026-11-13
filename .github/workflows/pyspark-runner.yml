@@ -7,7 +7,13 @@ name: PySpark runner
 on:
   push:
     branches: [main]
+    paths:
+      - "crates/sqllogictest/scripts/**"
+      - ".github/workflows/pyspark-runner.yml"
   pull_request:
+    paths:
+      - "crates/sqllogictest/scripts/**"
+      - ".github/workflows/pyspark-runner.yml"
 
 permissions:
   contents: read

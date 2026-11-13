@@ -11,7 +11,7 @@ in the file. The expected results come from DataFusion, so every difference
 reported here is a query where DataFusion and Spark disagree, or where the
 test expects the wrong value.
 
-This is a manual tool and does not run in CI. See README.md for setup.
+Running Spark is manual; only the unit tests run in CI. See README.md for setup.
 """
 
 from __future__ import annotations
@@ -358,7 +358,11 @@ _ARROW_UNITS = {
 # Spark's TIME(p) precision for each Arrow time unit. Spark has no nanoseconds.
 _TIME_PRECISION = {"s": 0, "ms": 3, "us": 6}
 
-_UTC_NAMES = {"UTC", "Etc/UTC", "Z", "+00:00", "+00", "+0000", "GMT"}
+_UTC_NAMES = {"UTC", "ETC/UTC", "Z", "+00:00", "+00", "+0000", "GMT"}
+
+
+def _is_utc(name: str) -> bool:
+    return name.upper() in _UTC_NAMES
 
 
 def _arrow_unit(t: ArrowType) -> str:
@@ -382,7 +386,7 @@ def _arrow_time_zone(t: ArrowType) -> Optional[str]:
 
 
 def _same_time_zone(a: str, b: str) -> bool:
-    return a == b or (a in _UTC_NAMES and b in _UTC_NAMES)
+    return a == b or (_is_utc(a) and _is_utc(b))
 
 
 def spark_type_for_arrow(t: ArrowType) -> str:
@@ -476,7 +480,7 @@ def _temporal_cast(t: ArrowType, arg: list[tuple[str, str]], arg_sql: str, time_
     if kind == "typed":
         # DataFusion's TIMESTAMP literal has no time zone and Spark's is in the
         # session time zone, so they are the same value only in UTC.
-        if time_zone not in _UTC_NAMES:
+        if not _is_utc(time_zone):
             raise Skip(f"arrow_cast of a typed literal to {t.name} in a session time zone other than UTC")
         kind = "string"
         arg_sql = "'" + value.replace("'", "''") + "'"
@@ -505,7 +509,7 @@ def _temporal_cast(t: ArrowType, arg: list[tuple[str, str]], arg_sql: str, time_
     # In a UTC session, Spark's TIMESTAMP holds the same values as an Arrow
     # timestamp without a time zone, and functions such as unix_micros accept
     # only TIMESTAMP, not TIMESTAMP_NTZ.
-    utc_session = time_zone in _UTC_NAMES
+    utc_session = _is_utc(time_zone)
     spark_type = "TIMESTAMP" if tz is not None or utc_session else "TIMESTAMP_NTZ"
     if kind == "null":
         return f"CAST(NULL AS {spark_type})"
@@ -552,21 +556,36 @@ _DATE_FUNCTIONS = {
 _INTEGER_TYPES = ("TINYINT", "SMALLINT", "INT", "BIGINT")
 
 
-def _is_date(sql: str) -> bool:
-    """Whether a translated expression is visibly a DATE: a DATE literal, a cast
-    to DATE, or a call to a function that returns one."""
+_TIMESTAMP_TYPES = ("TIMESTAMP", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ")
+
+
+def _visible_type(sql: str) -> Optional[str]:
+    """"DATE" or "TIMESTAMP" if a translated expression is visibly one: a typed
+    literal, a cast, or a call to a function that returns a DATE. Otherwise None."""
     tokens = _strip_parens(_tokenize(sql))
-    if len(tokens) == 2 and tokens[0][1].upper() == "DATE" and tokens[1][0] == "string":
-        return True
+    if len(tokens) >= 3 and tokens[-2][0] == "cast":
+        # expr::TYPE
+        return _temporal_name(tokens[-1][1])
+    if len(tokens) == 2 and tokens[1][0] == "string":
+        return _temporal_name(tokens[0][1])
     if len(tokens) < 3 or tokens[0][0] != "word" or tokens[1][1] != "(":
-        return False
+        return None
     if _matching_paren(tokens, 1) != len(tokens) - 1:
-        return False
+        return None
     name = tokens[0][1].lower()
     if name == "cast":
         inner = tokens[2:-1]
-        return len(inner) >= 2 and inner[-1][1].upper() == "DATE" and inner[-2][1].upper() == "AS"
-    return name in _DATE_FUNCTIONS
+        if len(inner) >= 2 and inner[-2][1].upper() == "AS":
+            return _temporal_name(inner[-1][1])
+        return None
+    return "DATE" if name in _DATE_FUNCTIONS else None
+
+
+def _temporal_name(type_name: str) -> Optional[str]:
+    type_name = type_name.upper()
+    if type_name == "DATE":
+        return "DATE"
+    return "TIMESTAMP" if type_name in _TIMESTAMP_TYPES else None
 
 
 def _matching_paren(tokens: list[tuple[str, str]], open_index: int) -> int:
@@ -606,22 +625,41 @@ def _type_string(name: str, args: list) -> str:
     return type_arg[0][1][1:-1].replace("''", "'")
 
 
+_ARROW_TEMPORAL_TYPES = ("Date32", "Date64", "Time32", "Time64", "Timestamp")
+
+
+def _contains_temporal(t) -> bool:
+    if isinstance(t, ArrowType):
+        return t.name in _ARROW_TEMPORAL_TYPES or any(_contains_temporal(a) for a in t.args)
+    # A struct or map field, or a scalar argument such as a time zone.
+    field_type = getattr(t, "type", None)
+    return isinstance(field_type, ArrowType) and _contains_temporal(field_type)
+
+
 def _arrow_cast(arg: list, arg_sql: str, type_string: str, time_zone: str) -> str:
     try:
         arrow_type = parse_arrow_type(type_string)
     except (ValueError, TypeError, AttributeError):
         raise Skip("arrow_cast to a type this runner cannot parse")
-    if arrow_type.name in ("Date32", "Date64", "Time32", "Time64", "Timestamp"):
+    if arrow_type.name in _ARROW_TEMPORAL_TYPES:
         return _temporal_cast(arrow_type, arg, arg_sql, time_zone)
+    if _contains_temporal(arrow_type) and _literal(arg)[0] != "null":
+        # _temporal_cast handles only top-level values. Inside a list or struct,
+        # Arrow and Spark convert numbers to dates and timestamps differently.
+        raise Skip("arrow_cast to a nested date, time or timestamp")
     try:
         spark_type = spark_type_for_arrow(arrow_type)
     except (ValueError, TypeError, AttributeError, IndexError):
         raise Skip("arrow_cast to a type this runner cannot parse")
-    if spark_type in _INTEGER_TYPES and _is_date(arg_sql):
+    source = _visible_type(arg_sql) if spark_type in _INTEGER_TYPES else None
+    if source == "DATE":
         # Arrow casts a date to an integer as days since the epoch.
         # Spark's CAST returns NULL, and unix_date returns the days.
         days = f"unix_date({arg_sql})"
         return days if spark_type == "INT" else f"CAST({days} AS {spark_type})"
+    if source == "TIMESTAMP":
+        # Arrow returns the count of the timestamp's unit, and Spark returns seconds.
+        raise Skip("arrow_cast of a timestamp to an integer, which counts Arrow's time unit")
     return f"CAST({arg_sql} AS {spark_type})"
 
 
@@ -706,11 +744,11 @@ def translate(sql: str, time_zone: str = "UTC") -> str:
 
 _NAME = r"[A-Za-z_][A-Za-z0-9_]*"
 _CREATE_RE = re.compile(
-    rf"\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?({_NAME})\s*",
+    rf"\s*CREATE\s+(OR\s+REPLACE\s+)?(?:TABLE|VIEW)\s+(IF\s+NOT\s+EXISTS\s+)?({_NAME})\s*",
     re.IGNORECASE,
 )
 _DROP_RE = re.compile(
-    rf"\s*DROP\s+(?:TABLE|VIEW)\s+(?:IF\s+EXISTS\s+)?({_NAME})\s*;?\s*$",
+    rf"\s*DROP\s+(?:TABLE|VIEW)\s+(IF\s+EXISTS\s+)?({_NAME})\s*;?\s*$",
     re.IGNORECASE,
 )
 _AS_RE = re.compile(r"AS\b\s*", re.IGNORECASE)
@@ -735,11 +773,15 @@ def translate_statement(sql: str, time_zone: str = "UTC") -> str:
     """Translate a statement, turning DataFusion tables into Spark temporary views."""
     m = _DROP_RE.match(sql)
     if m:
-        return f"DROP VIEW IF EXISTS {m.group(1)}"
+        return f"DROP VIEW {'IF EXISTS ' if m.group(1) else ''}{m.group(2)}"
     m = _CREATE_RE.match(sql)
     if not m:
         return translate(sql, time_zone)
-    name, rest = m.group(1), sql[m.end() :]
+    if m.group(2):
+        # Spark does not allow IF NOT EXISTS on a temporary view.
+        raise Skip("CREATE TABLE IF NOT EXISTS, which a Spark temporary view cannot express")
+    create = f"CREATE {'OR REPLACE ' if m.group(1) else ''}TEMPORARY VIEW"
+    name, rest = m.group(3), sql[m.end() :]
     columns = None
     if rest.startswith("("):
         depth = 0
@@ -754,7 +796,7 @@ def translate_statement(sql: str, time_zone: str = "UTC") -> str:
         raise Skip("CREATE TABLE without AS")
     query = rest[m.end() :].rstrip().rstrip(";")
     if columns is None:
-        return translate(f"CREATE OR REPLACE TEMPORARY VIEW {name} AS {query}", time_zone)
+        return translate(f"{create} {name} AS {query}", time_zone)
     names, casts = [], []
     for column in columns:
         parts = column.split(None, 1)
@@ -763,7 +805,7 @@ def translate_statement(sql: str, time_zone: str = "UTC") -> str:
         names.append(parts[0])
         casts.append(f"CAST({parts[0]} AS {parts[1]}) AS {parts[0]}")
     return translate(
-        f"CREATE OR REPLACE TEMPORARY VIEW {name} AS SELECT {', '.join(casts)} "
+        f"{create} {name} AS SELECT {', '.join(casts)} "
         f"FROM ({query}) AS __slt_values({', '.join(names)})",
         time_zone,
     )
@@ -938,15 +980,18 @@ def _naive_timestamp(value: datetime.datetime) -> str:
 
 def zone(name: str) -> datetime.tzinfo:
     """Resolve a Spark/DataFusion time zone name or offset such as +05:30."""
-    if name.upper() in ("UTC", "Z", "GMT", "+00:00"):
+    if _is_utc(name):
         return datetime.timezone.utc
-    m = re.fullmatch(r"([+-])(\d{1,2}):?(\d{2})", name)
+    m = re.fullmatch(r"([+-])(\d{1,2})(?::?(\d{2}))?", name)
     if m:
-        offset = datetime.timedelta(hours=int(m.group(2)), minutes=int(m.group(3)))
+        offset = datetime.timedelta(hours=int(m.group(2)), minutes=int(m.group(3) or 0))
         return datetime.timezone(-offset if m.group(1) == "-" else offset)
-    from zoneinfo import ZoneInfo
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-    return ZoneInfo(name)
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise Unsupported(f"time zone {name}")
 
 
 def _local_timestamp(value: datetime.datetime, time_zone: str) -> str:
@@ -1265,19 +1310,58 @@ class SparkRunner:
 
 
 def _maps_as_entries(df, schema):
-    """Collect top-level MAP columns as arrays of entries.
+    """Collect MAP values, at any depth, as arrays of entries.
 
     PySpark returns a MAP as a dict built from a Java HashMap, which loses
     Spark's entry order and cannot have keys such as arrays.
     """
-    is_map = [type(f.dataType).__name__ == "MapType" for f in schema.fields]
-    if not any(is_map):
+    if not any(_has_map(f.dataType) for f in schema.fields):
         return df
     from pyspark.sql import functions as F
 
-    names = [f"_c{i}" for i in range(len(is_map))]
-    columns = [F.map_entries(n).alias(n) if m else F.col(n) for n, m in zip(names, is_map)]
+    names = [f"_c{i}" for i in range(len(schema.fields))]
+    columns = [
+        _entries(F.col(n), f.dataType).alias(n) for n, f in zip(names, schema.fields)
+    ]
     return df.toDF(*names).select(columns)
+
+
+def _has_map(data_type) -> bool:
+    kind = type(data_type).__name__
+    if kind == "MapType":
+        return True
+    if kind == "ArrayType":
+        return _has_map(data_type.elementType)
+    if kind == "StructType":
+        return any(_has_map(f.dataType) for f in data_type.fields)
+    return False
+
+
+def _entries(column, data_type):
+    """`column` with each MAP inside it replaced by its array of entries."""
+    if not _has_map(data_type):
+        return column
+    from pyspark.sql import functions as F
+
+    kind = type(data_type).__name__
+    if kind == "ArrayType":
+        return F.transform(column, lambda x: _entries(x, data_type.elementType))
+    if kind == "StructType":
+        fields = [
+            _entries(column.getField(f.name), f.dataType).alias(f.name)
+            for f in data_type.fields
+        ]
+        return F.when(column.isNotNull(), F.struct(*fields))
+    entries = F.map_entries(column)
+    if not (_has_map(data_type.keyType) or _has_map(data_type.valueType)):
+        return entries
+    return F.transform(
+        entries,
+        lambda e: F.struct(
+            _entries(e.getField("key"), data_type.keyType).alias("key"),
+            _entries(e.getField("value"), data_type.valueType).alias("value"),
+        ),
+    )
 
 
 def _condition(e) -> Optional[str]:
