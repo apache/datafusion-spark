@@ -10,8 +10,8 @@ use datafusion::execution::SessionStateBuilder;
 use crate::SparkOptions;
 use crate::planner::SparkFunctionPlanner;
 use crate::{
-    all_default_aggregate_functions, all_default_scalar_functions, all_default_table_functions,
-    all_default_window_functions,
+    all_default_aggregate_functions, all_default_scalar_functions,
+    all_default_table_functions, all_default_window_functions,
 };
 
 /// Extension trait for adding Apache Spark features to [`SessionStateBuilder`].
@@ -43,11 +43,16 @@ pub trait SessionStateBuilderSpark {
 
 impl SessionStateBuilderSpark for SessionStateBuilder {
     fn with_spark_features(mut self) -> Self {
-        self.config()
+        // Check if SparkOptions already exists; if not, insert default.
+        // The immutable borrow from .get() is released before .insert().
+        let mut extensions = &mut self
+            .config()
             .get_or_insert_with(Default::default)
             .options_mut()
-            .extensions
-            .insert(SparkOptions::default());
+            .extensions;
+        if extensions.get::<SparkOptions>().is_none() {
+            extensions.insert(SparkOptions::default());
+        }
 
         self.expr_planners()
             .get_or_insert_with(Vec::new)
