@@ -5,7 +5,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use datafusion_common::config::{ConfigExtension, ConfigField, Visit};
+use datafusion_common::config::{ConfigExtension, ConfigField, ConfigOptions, Visit};
 use datafusion_common::extensions_options;
 use datafusion_common::{DataFusionError, Result};
 
@@ -60,6 +60,14 @@ impl ConfigExtension for SparkOptions {
     const PREFIX: &'static str = "spark";
 }
 
+/// Returns whether Spark map functions should keep the last value for duplicate keys.
+pub fn map_last_value_wins(options: &ConfigOptions) -> bool {
+    options
+        .extensions
+        .get::<SparkOptions>()
+        .is_some_and(|options| options.map_key_dedup_policy == MapKeyDedupPolicy::LastWin)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,5 +103,20 @@ mod tests {
             .to_string();
 
         assert!(error.contains("Invalid MapKeyDedupPolicy"), "{error}");
+    }
+
+    #[test]
+    fn missing_spark_options_use_exception_policy() {
+        assert!(!map_last_value_wins(&ConfigOptions::default()));
+    }
+
+    #[test]
+    fn configured_spark_options_enable_last_win() {
+        let mut config = ConfigOptions::default();
+        config.extensions.insert(SparkOptions {
+            map_key_dedup_policy: MapKeyDedupPolicy::LastWin,
+        });
+
+        assert!(map_last_value_wins(&config));
     }
 }

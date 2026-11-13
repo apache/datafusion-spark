@@ -50,7 +50,7 @@ impl SessionStateBuilderSpark for SessionStateBuilder {
     fn with_spark_features(mut self) -> Self {
         // Check if SparkOptions already exists; if not, insert default.
         // The immutable borrow from .get() is released before .insert().
-        let mut extensions = &mut self
+        let extensions = &mut self
             .config()
             .get_or_insert_with(Default::default)
             .options_mut()
