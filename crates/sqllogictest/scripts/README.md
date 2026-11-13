@@ -7,7 +7,7 @@ SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one
 # Running the Spark sqllogictests on Apache Spark
 
 `pyspark_slt_runner.py` runs the `.slt` files in
-[`crates/sqllogictest/test_files`](../../sqllogictest/test_files)
+[`crates/sqllogictest/test_files`](../test_files)
 on Apache Spark 4.2 and reports every query where Spark's result differs from
 the expected result in the file.
 
@@ -23,7 +23,7 @@ virtual environment:
 
 ```shell
 python3 -m venv /tmp/pyspark-4.2
-/tmp/pyspark-4.2/bin/pip install -r crates/spark/scripts/requirements.txt
+/tmp/pyspark-4.2/bin/pip install -r crates/sqllogictest/scripts/requirements.txt
 ```
 
 The runner ignores `SPARK_HOME`, so it always uses the Spark bundled with this
@@ -35,14 +35,14 @@ From the repository root:
 
 ```shell
 # All files
-/tmp/pyspark-4.2/bin/python crates/spark/scripts/pyspark_slt_runner.py
+/tmp/pyspark-4.2/bin/python crates/sqllogictest/scripts/pyspark_slt_runner.py
 
 # One file or directory
-/tmp/pyspark-4.2/bin/python crates/spark/scripts/pyspark_slt_runner.py \
+/tmp/pyspark-4.2/bin/python crates/sqllogictest/scripts/pyspark_slt_runner.py \
     crates/sqllogictest/test_files/math/abs.slt
 
 # Also list skipped and passing records
-/tmp/pyspark-4.2/bin/python crates/spark/scripts/pyspark_slt_runner.py --verbose
+/tmp/pyspark-4.2/bin/python crates/sqllogictest/scripts/pyspark_slt_runner.py --verbose
 ```
 
 Each difference is printed with its `file:line`, the query, the expected result
@@ -60,6 +60,10 @@ differences, and with status 2 if it stopped early because Spark failed.
 | results differ only in floating-point digits        | The values differ by a relative error below 1e-12                        |
 | same rows in a different order                      | Usually a query with no `ORDER BY`                                       |
 | the runner failed                                   | A bug in this runner, not Spark behavior                                 |
+
+A record that expects an error passes when Spark raises any error. The runner
+does not compare the error message, so `pass` does not mean that Spark fails for
+the same reason as DataFusion.
 
 Spark reads a literal such as `1.5` as a `DECIMAL` and DataFusion reads it as a
 `DOUBLE`, which explains many of the scale differences.
@@ -136,5 +140,5 @@ The runner's parsing, translation and formatting have unit tests that need
 neither Spark nor Java:
 
 ```shell
-python3 -m unittest discover -s crates/spark/scripts
+python3 -m unittest discover -s crates/sqllogictest/scripts
 ```

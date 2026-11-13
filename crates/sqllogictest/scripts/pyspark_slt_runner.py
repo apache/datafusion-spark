@@ -1230,10 +1230,15 @@ class SparkRunner:
         try:
             df = self.spark.sql(sql)
             schema = df.schema
-            return schema, _maps_as_entries(df, schema).limit(MAX_ROWS + 1).collect()
-        except TypeError as e:
-            # PySpark returns each MAP as a dict, which cannot have array keys.
-            raise SparkError("convert", f"PySpark cannot convert the result ({e})")
+            # Build the query outside the `try` below, so that a TypeError from
+            # the runner's own code is reported as a runner error, not a skip.
+            query = _maps_as_entries(df, schema).limit(MAX_ROWS + 1)
+            try:
+                rows = query.collect()
+            except TypeError as e:
+                # PySpark returns each MAP as a dict, which cannot have array keys.
+                raise SparkError("convert", f"PySpark cannot convert the result ({e})")
+            return schema, rows
         except ParseException as e:
             raise SparkError("parse", f"Spark cannot parse it ({_condition(e)})")
         except PySparkException as e:

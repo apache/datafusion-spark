@@ -4,7 +4,7 @@
 
 """Unit tests for pyspark_slt_runner.py. They do not need PySpark or Java.
 
-Run with: python3 -m unittest discover -s crates/spark/scripts
+Run with: python3 -m unittest discover -s crates/sqllogictest/scripts
 """
 
 import contextlib
