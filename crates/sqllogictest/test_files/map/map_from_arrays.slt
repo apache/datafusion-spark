@@ -106,24 +106,36 @@ SELECT
 {outer_key1: {inner_a: 1, inner_b: 2}, outer_key2: {inner_x: 10, inner_y: 20, inner_z: 30}}
 
 # Test with duplicate keys: raises DUPLICATED_MAP_KEY under Spark's default policy
-query error DataFusion error: Execution error: \[DUPLICATED_MAP_KEY\] Duplicate map key true was found
+query error
 SELECT map_from_arrays(array(true, false, true), array('a', NULL, 'b'));
+----
+DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key true was found
+
 
 # Integer keys with a duplicate also raise DUPLICATED_MAP_KEY.
-query error DataFusion error: Execution error: \[DUPLICATED_MAP_KEY\] Duplicate map key 1 was found
+query error
 SELECT map_from_arrays(array(1, 2, 1), array('a', 'b', 'c'));
+----
+DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key 1 was found
+
 
 # String keys with a duplicate also raise DUPLICATED_MAP_KEY.
-query error DataFusion error: Execution error: \[DUPLICATED_MAP_KEY\] Duplicate map key k was found
+query error
 SELECT map_from_arrays(array('k', 'k', 'k'), array(1, 2, 3));
+----
+DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key k was found
+
 
 # Multi-row: a clean row and a duplicate row still errors.
-query error DataFusion error: Execution error: \[DUPLICATED_MAP_KEY\] Duplicate map key 1 was found
+query error
 SELECT map_from_arrays(a, b)
 FROM values
     (array[1, 2], array['a', 'b']),
     (array[1, 1], array['x', 'y'])
 AS tab(a, b);
+----
+DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key 1 was found
+
 
 # Tests with different list types
 query ?

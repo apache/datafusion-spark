@@ -357,8 +357,11 @@ NULL
 statement ok
 set datafusion.execution.enable_ansi_mode = true;
 
-query error DataFusion error: Execution error: The url is invalid: inva lid://spark\.apache\.org/path\?query=1\. Use `try_parse_url` to tolerate invalid URL and return NULL instead\. SQLSTATE: 22P02
+query error
 SELECT parse_url('inva lid://spark.apache.org/path?query=1', 'QUERY');
+----
+DataFusion error: Execution error: The url is invalid: inva lid://spark.apache.org/path?query=1. Use `try_parse_url` to tolerate invalid URL and return NULL instead. SQLSTATE: 22P02
+
 
 query error DataFusion error: Execution error: InvalidPort
 SELECT parse_url('http://spark.apache.org:99999/path', 'HOST');
