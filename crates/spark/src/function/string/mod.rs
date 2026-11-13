@@ -17,6 +17,7 @@ pub mod like;
 pub mod luhn_check;
 pub mod make_valid_utf8;
 pub mod quote;
+pub mod regexp_extract;
 pub mod soundex;
 pub mod space;
 pub mod substring;
@@ -45,6 +46,7 @@ make_udf_function!(soundex::SparkSoundex, soundex);
 make_udf_function!(make_valid_utf8::SparkMakeValidUtf8, make_valid_utf8);
 make_udf_function!(is_valid_utf8::SparkIsValidUtf8, is_valid_utf8);
 make_udf_function!(quote::SparkQuote, quote);
+make_udf_function!(regexp_extract::SparkRegexpExtract, regexp_extract);
 make_udf_function!(to_binary::SparkToBinary, to_binary);
 make_udf_function!(to_binary::SparkTryToBinary, try_to_binary);
 
@@ -139,6 +141,11 @@ pub mod expr_fn {
         str
     ));
     export_functions!((
+        regexp_extract,
+        "Extracts the group `idx` (default 1, 0 for the whole match) of the first match of `regexp` in `str`.",
+        str regexp idx
+    ));
+    export_functions!((
         to_binary,
         "Converts the input str to a binary value based on the supplied fmt, which must be a case-insensitive literal of 'hex', 'utf-8', 'utf8' or 'base64'. Defaults to 'hex'.",
         str fmt
@@ -171,6 +178,7 @@ pub fn functions() -> Vec<Arc<ScalarUDF>> {
         make_valid_utf8(),
         is_valid_utf8(),
         quote(),
+        regexp_extract(),
         to_binary(),
         try_to_binary(),
     ]

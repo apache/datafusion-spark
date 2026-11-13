@@ -1,0 +1,243 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
+# SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
+
+# Tests for Spark-compatible regexp_extract
+# Reference: https://spark.apache.org/docs/latest/api/sql/index.html#regexp_extract
+# Expected values come from Spark's sql-tests/results/regexp-functions.sql.out
+# or were verified against Spark 4.2.0.
+# Patterns use Rust regex syntax, so Java-only features are not covered
+# beyond checking that they are rejected.
+
+query T
+SELECT regexp_extract('1a 2b 14m', '\d+', 0);
+----
+1
+
+# Default group index is 1
+query T
+SELECT regexp_extract('1a 2b 14m', '(\d+)([a-z]+)');
+----
+1
+
+query T
+SELECT regexp_extract('1a 2b 14m', '(\d+)([a-z]+)', 0);
+----
+1a
+
+query T
+SELECT regexp_extract('1a 2b 14m', '(\d+)([a-z]+)', 1);
+----
+1
+
+query T
+SELECT regexp_extract('1a 2b 14m', '(\d+)([a-z]+)', 2);
+----
+a
+
+# A group that did not take part in the match, or no match at all, gives ''
+query T
+SELECT regexp_extract('1a 2b 14m', '(\d+)?', 1);
+----
+1
+
+query T
+SELECT regexp_extract('a b m', '(\d+)?', 1);
+----
+(empty)
+
+query T
+SELECT regexp_extract('1a 2b 14m', '(\d+)?([a-z]+)', 1);
+----
+1
+
+query T
+SELECT regexp_extract('a b m', '(\d+)?([a-z]+)', 1);
+----
+(empty)
+
+query T
+SELECT regexp_extract('abc', '(\d+)', 1);
+----
+(empty)
+
+# idx is only checked when the pattern matches, so no match gives '' even
+# when idx is out of range (including the default idx 1 with no groups)
+query T
+SELECT regexp_extract('abc', '\d+');
+----
+(empty)
+
+query T
+SELECT regexp_extract('abc', '\d+', 5);
+----
+(empty)
+
+query T
+SELECT regexp_extract('abc', '\d+', -1);
+----
+(empty)
+
+query T
+SELECT regexp_extract('abc', '(\d+)', 2);
+----
+(empty)
+
+query T
+SELECT regexp_extract('', '\d+', 3);
+----
+(empty)
+
+# NULL in any argument gives NULL
+query T
+SELECT regexp_extract(NULL, '(\d+)', 1);
+----
+NULL
+
+query T
+SELECT regexp_extract('a1', NULL, 1);
+----
+NULL
+
+query T
+SELECT regexp_extract('a1', '(\d+)', NULL);
+----
+NULL
+
+# A NULL row returns NULL before idx is checked
+query T
+SELECT regexp_extract('a', NULL, 99);
+----
+NULL
+
+# Group index out of range
+statement error INVALID_PARAMETER_VALUE.REGEX_GROUP_INDEX.*Expects group index between 0 and 0, but got 1
+SELECT regexp_extract('1a 2b 14m', '\d+');
+
+statement error Expects group index between 0 and 0, but got 1
+SELECT regexp_extract('1a 2b 14m', '\d+', 1);
+
+statement error Expects group index between 0 and 0, but got 2
+SELECT regexp_extract('1a 2b 14m', '\d+', 2);
+
+statement error Expects group index between 0 and 0, but got -1
+SELECT regexp_extract('1a 2b 14m', '\d+', -1);
+
+statement error Expects group index between 0 and 2, but got 3
+SELECT regexp_extract('1a 2b 14m', '(\d+)([a-z]+)', 3);
+
+statement error Expects group index between 0 and 2, but got -1
+SELECT regexp_extract('1a 2b 14m', '(\d+)([a-z]+)', -1);
+
+# Invalid pattern
+statement error INVALID_PARAMETER_VALUE.PATTERN
+SELECT regexp_extract('1a 2b 14m', '(?l)');
+
+statement error INVALID_PARAMETER_VALUE.PATTERN.*'\(unclosed'
+SELECT regexp_extract('x', '(unclosed', 0);
+
+# Rust regex syntax: Java-only lookaround and backreferences are invalid patterns
+statement error INVALID_PARAMETER_VALUE.PATTERN
+SELECT regexp_extract('ab', 'a(?=b)', 0);
+
+statement error INVALID_PARAMETER_VALUE.PATTERN
+SELECT regexp_extract('aa', '(a)\1', 0);
+
+# Rust regex \d matches any Unicode digit (Spark's Java \d matches only ASCII 0-9)
+query T
+SELECT regexp_extract('x٣y', '\d', 0);
+----
+٣
+
+# Wrong number of arguments
+statement error
+SELECT regexp_extract('abc');
+
+# Column input, including NULL rows and a per-row pattern
+statement ok
+CREATE TABLE regexp_extract_t AS VALUES ('100-200', '(\d+)-(\d+)'), (NULL, '(\d+)'), ('abc', '([a-z])');
+
+query T
+SELECT regexp_extract(column1, column2, 1) FROM regexp_extract_t;
+----
+100
+NULL
+a
+
+# Per-row patterns alternating between rows, with NULL string and pattern rows
+statement ok
+CREATE TABLE regexp_extract_patterns AS VALUES ('a1', '(\d)'), (NULL, '(\d)'), ('b2', NULL), ('c3', '([a-z])'), ('d4', '(\d)'), ('e5', '([a-z])(\d)');
+
+query T
+SELECT regexp_extract(column1, column2, 1) FROM regexp_extract_patterns;
+----
+1
+NULL
+NULL
+c
+4
+e
+
+# Per-row idx, including NULL and an out-of-range idx on a row that does not match
+statement ok
+CREATE TABLE regexp_extract_idx AS VALUES ('a1', '(\d)', 1), ('d4', '(\d)', NULL), ('xy', '(\d)', 7), ('c3', '([a-z])(\d)', 2);
+
+query T
+SELECT regexp_extract(column1, column2, column3) FROM regexp_extract_idx;
+----
+1
+NULL
+(empty)
+3
+
+query T
+SELECT regexp_extract(column1, '(\d+)', column2) FROM (VALUES ('abc', 3), ('def', -1), (NULL, 9));
+----
+(empty)
+(empty)
+NULL
+
+# An out-of-range idx fails once a row matches
+statement error Expects group index between 0 and 1, but got 3
+SELECT regexp_extract(column1, '(\d+)', column2) FROM (VALUES ('abc', 3), ('12', 3));
+
+# Literal pattern with no match on any row and the default idx
+query T
+SELECT regexp_extract(column1, '\d+') FROM (VALUES ('abc'), ('xyz'));
+----
+(empty)
+(empty)
+
+# An invalid literal pattern is not compiled when every string is NULL
+query T
+SELECT regexp_extract(column1, '(unclosed', 0) FROM (VALUES (CAST(NULL AS STRING)), (CAST(NULL AS STRING)));
+----
+NULL
+NULL
+
+# Other string types are accepted
+query T
+SELECT regexp_extract(arrow_cast('1a 2b', 'LargeUtf8'), arrow_cast('(\d+)([a-z])', 'Utf8View'), 2);
+----
+a
+
+# Integer types other than INT are accepted for idx
+query T
+SELECT regexp_extract('1a 2b', '(\d+)([a-z])', arrow_cast(2, 'Int8'));
+----
+a
+
+# The result type is a string
+query T
+SELECT arrow_typeof(regexp_extract('a', '(a)'));
+----
+Utf8
+
+statement ok
+DROP TABLE regexp_extract_t;
+
+statement ok
+DROP TABLE regexp_extract_patterns;
+
+statement ok
+DROP TABLE regexp_extract_idx;
