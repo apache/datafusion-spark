@@ -42,6 +42,11 @@ pub trait SessionStateBuilderSpark {
 }
 
 impl SessionStateBuilderSpark for SessionStateBuilder {
+    /// Registers Spark-compatible planners, functions, and a default
+    /// [`SparkOptions`] extension (only if one isn't already set).
+    ///
+    /// Call `with_config` **before** this method: `with_config` replaces the
+    /// whole config and would drop the `SparkOptions` extension.
     fn with_spark_features(mut self) -> Self {
         // Check if SparkOptions already exists; if not, insert default.
         // The immutable borrow from .get() is released before .insert().
