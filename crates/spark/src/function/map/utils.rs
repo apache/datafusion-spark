@@ -6,12 +6,14 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::Int32Array;
-use arrow::array::{Array, ArrayRef, AsArray, BooleanBuilder, MapArray, StructArray};
+use arrow::array::{
+    Array, ArrayRef, AsArray, BooleanBuilder, Int32Array, MapArray, StructArray,
+};
 use arrow::buffer::{NullBuffer, OffsetBuffer};
 use arrow::compute::{filter, take};
 use arrow::datatypes::{DataType, Field, Fields};
 use datafusion_common::{Result, ScalarValue, exec_datafusion_err, exec_err};
+
 /// Helper function to get element [`DataType`]
 /// from [`List`](DataType::List)/[`LargeList`](DataType::LargeList)/[`FixedSizeList`](DataType::FixedSizeList)<br>
 /// [`Null`](DataType::Null) can be coerced to `ListType`([`Null`](DataType::Null)), so [`Null`](DataType::Null) is returned<br>
@@ -78,7 +80,10 @@ pub fn get_list_offsets(array: &ArrayRef) -> Result<Cow<'_, [i32]>> {
 /// - Map keys are non-nullable
 /// - Map entries are non-nullable
 /// - Map values can be null
-pub fn map_type_from_key_value_types(key_type: &DataType, value_type: &DataType) -> DataType {
+pub fn map_type_from_key_value_types(
+    key_type: &DataType,
+    value_type: &DataType,
+) -> DataType {
     DataType::Map(
         Arc::new(Field::new(
             "entries",
@@ -137,7 +142,6 @@ pub fn map_from_keys_values_offsets_nulls(
         field, offsets, entries, nulls, false,
     )?))
 }
-
 #[allow(clippy::allow_attributes, clippy::mutable_key_type)] // ScalarValue has interior mutability but is intentionally used as hash key
 fn map_deduplicate_keys(
     flat_keys: &ArrayRef,
@@ -199,8 +203,11 @@ fn map_deduplicate_keys(
             }
             key_to_output_idx.clear();
             for cur_entry_idx in 0..num_keys_entries {
-                let key = ScalarValue::try_from_array(&flat_keys, cur_keys_offset + cur_entry_idx)?
-                    .compacted();
+                let key = ScalarValue::try_from_array(
+                    &flat_keys,
+                    cur_keys_offset + cur_entry_idx,
+                )?
+                .compacted();
                 let abs_value_idx = (cur_values_offset + cur_entry_idx) as i32;
 
                 if let Some(&output_idx) = key_to_output_idx.get(&key) {
@@ -248,7 +255,10 @@ mod tests {
     use arrow::array::{Int32Array, LargeListArray, NullArray, StringArray};
     use arrow::datatypes::Int32Type;
 
-    fn int32_utf8_inputs(keys: Vec<i32>, values: Vec<Option<&str>>) -> (ArrayRef, ArrayRef) {
+    fn int32_utf8_inputs(
+        keys: Vec<i32>,
+        values: Vec<Option<&str>>,
+    ) -> (ArrayRef, ArrayRef) {
         let keys: ArrayRef = Arc::new(Int32Array::from(keys));
         let values: ArrayRef = Arc::new(StringArray::from(values));
         (keys, values)
