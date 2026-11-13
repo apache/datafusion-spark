@@ -89,12 +89,26 @@ makes only these changes:
   `FLOAT8` to `DOUBLE` and `TEXT` to `STRING`
 - `column1`, `column2`, ... become `col1`, `col2`, ..., which is how Spark names
   `VALUES` columns
+- `arrow_cast(x, 'Type')` becomes `CAST(x AS type)` when the Arrow type has the
+  same values as a Spark type. Types that differ only in their physical layout
+  map to one Spark type: `Utf8`, `LargeUtf8` and `Utf8View` are all `STRING`,
+  `LargeList(Int64)` and `FixedSizeList(3, Int64)` are `ARRAY<BIGINT>`, and a
+  `Dictionary` is its value type. Arrow reads a number cast to a date or
+  timestamp as a count of the type's unit, so those casts are translated only
+  for literals: `arrow_cast(1703512245, 'Timestamp(s)')` becomes
+  `timestamp_seconds(1703512245)`. In a UTC session, a timestamp without a
+  time zone becomes Spark's `TIMESTAMP`, which holds the same values and is the
+  type functions such as `unix_micros` accept. A date cast to an integer becomes
+  `unix_date(x)`, because Arrow counts days since the epoch and Spark's `CAST`
+  returns NULL.
 
 These records are skipped and counted, with the reason, in the summary:
 
 - queries Spark cannot parse, such as `[1, 2]` array literals
-- queries that call a function Spark does not have, such as `arrow_cast` and
-  `arrow_typeof`
+- queries that call a function Spark does not have, such as `arrow_typeof`
+- `arrow_cast` to a type Spark does not have, such as an unsigned integer,
+  `Float16`, or a nanosecond timestamp, and `arrow_cast` of a non-literal to a
+  date, time or timestamp
 - queries whose string literals contain a backslash. Spark reads the backslash
   as an escape character and DataFusion does not, so the two engines would see
   different strings.

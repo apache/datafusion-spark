@@ -170,8 +170,9 @@ def parse_slt(path: Path) -> list[Record]:
 # Translating DataFusion SQL to Spark SQL
 #
 # Spark 4.2 parses most of these files as written, including `::` casts.
-# Only a few renames are applied here. Anything else Spark cannot parse, and
-# any function Spark does not have (such as `arrow_cast`), is skipped.
+# Only a few renames are applied here, and `arrow_cast` becomes a CAST (see
+# below). Anything else Spark cannot parse, and any function Spark does not
+# have (such as `arrow_typeof`), is skipped.
 # ---------------------------------------------------------------------------
 
 _TOKEN_RE = re.compile(
@@ -221,9 +222,420 @@ def _translate_type(tokens: list[tuple[str, str]], i: int) -> str:
     return text
 
 
-def translate(sql: str) -> str:
-    """Translate the parts of DataFusion's SQL that Spark spells differently."""
+# ---------------------------------------------------------------------------
+# arrow_cast
+#
+# `arrow_cast(expr, 'Type')` casts to an Arrow type. Many Arrow types differ
+# from a Spark type only in their physical layout: Utf8, LargeUtf8 and Utf8View
+# are all Spark's STRING, and a dictionary is an encoding of its value type. So
+# the call becomes a CAST to that Spark type. A type Spark does not have, such
+# as an unsigned integer, skips the record.
+#
+# Arrow interprets a number cast to a date, time or timestamp as a count of the
+# type's unit (days, seconds, nanoseconds, ...), and Spark does not, so those
+# casts are only translated for literal arguments.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ArrowType:
+    """A parsed Arrow type, such as `Decimal128(10, 2)` or `List(Int32)`."""
+
+    name: str
+    args: tuple = ()
+
+
+@dataclass(frozen=True)
+class ArrowField:
+    """A named field in a `Struct` or `Map` type, such as `"a": Int64`."""
+
+    name: str
+    type: object
+
+
+_ARROW_TOKEN_RE = re.compile(
+    r"""\s*(?:
+      (?P<string>"(?:[^"\\]|\\.)*")
+    | (?P<number>-?\d+)
+    | (?P<word>[A-Za-zµ_][A-Za-z0-9µ_-]*)
+    | (?P<punct>[(),:])
+    )""",
+    re.VERBOSE,
+)
+
+
+def parse_arrow_type(text: str):
+    """Parse an Arrow type as DataFusion's arrow_cast spells it."""
+    tokens = []
+    pos, text = 0, text.strip()
+    while pos < len(text):
+        m = _ARROW_TOKEN_RE.match(text, pos)
+        if not m:
+            raise ValueError(text)
+        tokens.append((m.lastgroup, m.group(m.lastgroup)))
+        pos = m.end()
+    i = 0
+
+    def peek() -> Optional[str]:
+        return tokens[i][1] if i < len(tokens) else None
+
+    def expect(value: str) -> None:
+        nonlocal i
+        if peek() != value:
+            raise ValueError(text)
+        i += 1
+
+    def value():
+        nonlocal i
+        if i >= len(tokens):
+            raise ValueError(text)
+        kind, token = tokens[i]
+        i += 1
+        if kind == "number":
+            return int(token)
+        if kind == "string":
+            name = token[1:-1]
+            if peek() == ":":
+                i += 1
+                return ArrowField(name, value())
+            return name
+        if kind == "word":
+            # Nullability does not change the Spark type.
+            if token in ("non-null", "nullable"):
+                return value()
+            args = []
+            if peek() == "(":
+                i += 1
+                while peek() != ")":
+                    args.append(value())
+                    if peek() == ",":
+                        i += 1
+                expect(")")
+            return ArrowType(token, tuple(args))
+        raise ValueError(text)
+
+    parsed = value()
+    if i != len(tokens) or not isinstance(parsed, ArrowType):
+        raise ValueError(text)
+    return parsed
+
+
+_ARROW_SIMPLE_TYPES = {
+    "Boolean": "BOOLEAN",
+    "Int8": "TINYINT",
+    "Int16": "SMALLINT",
+    "Int32": "INT",
+    "Int64": "BIGINT",
+    "Float32": "FLOAT",
+    "Float64": "DOUBLE",
+    "Utf8": "STRING",
+    "LargeUtf8": "STRING",
+    "Utf8View": "STRING",
+    "Binary": "BINARY",
+    "LargeBinary": "BINARY",
+    "BinaryView": "BINARY",
+    "FixedSizeBinary": "BINARY",
+    "Date32": "DATE",
+    "Date64": "DATE",
+}
+
+_ARROW_LIST_TYPES = ("List", "LargeList", "ListView", "LargeListView", "FixedSizeList")
+
+_ARROW_DECIMAL_TYPES = ("Decimal32", "Decimal64", "Decimal128", "Decimal256")
+
+_ARROW_UNITS = {
+    "Second": "s",
+    "s": "s",
+    "Millisecond": "ms",
+    "ms": "ms",
+    "Microsecond": "us",
+    "µs": "us",
+    "us": "us",
+    "Nanosecond": "ns",
+    "ns": "ns",
+}
+
+# Spark's TIME(p) precision for each Arrow time unit. Spark has no nanoseconds.
+_TIME_PRECISION = {"s": 0, "ms": 3, "us": 6}
+
+_UTC_NAMES = {"UTC", "Etc/UTC", "Z", "+00:00", "+00", "+0000", "GMT"}
+
+
+def _arrow_unit(t: ArrowType) -> str:
+    if not t.args or not isinstance(t.args[0], ArrowType) or t.args[0].name not in _ARROW_UNITS:
+        raise Skip("arrow_cast to a type this runner cannot parse")
+    return _ARROW_UNITS[t.args[0].name]
+
+
+def _arrow_time_zone(t: ArrowType) -> Optional[str]:
+    """The time zone of an Arrow Timestamp: `None`, `Some("UTC")` or `"UTC"`."""
+    if len(t.args) < 2:
+        return None
+    tz = t.args[1]
+    if isinstance(tz, str):
+        return tz
+    if isinstance(tz, ArrowType) and tz.name == "Some" and len(tz.args) == 1:
+        return tz.args[0]
+    if isinstance(tz, ArrowType) and tz.name == "None":
+        return None
+    raise Skip("arrow_cast to a type this runner cannot parse")
+
+
+def _same_time_zone(a: str, b: str) -> bool:
+    return a == b or (a in _UTC_NAMES and b in _UTC_NAMES)
+
+
+def spark_type_for_arrow(t: ArrowType) -> str:
+    """The Spark type with the same values as an Arrow type, or raise Skip."""
+    name = t.name
+    if name in _ARROW_SIMPLE_TYPES:
+        return _ARROW_SIMPLE_TYPES[name]
+    if name in ("UInt8", "UInt16", "UInt32", "UInt64"):
+        raise Skip("arrow_cast to an unsigned integer, which Spark does not have")
+    if name in _ARROW_DECIMAL_TYPES:
+        precision, scale = t.args
+        if precision > MAX_DECIMAL_PRECISION:
+            raise Skip(f"DECIMAL precision above {MAX_DECIMAL_PRECISION}")
+        if scale < 0:
+            raise Skip("arrow_cast to a DECIMAL with a negative scale")
+        return f"DECIMAL({precision}, {scale})"
+    if name in _ARROW_LIST_TYPES:
+        return f"ARRAY<{spark_type_for_arrow(t.args[-1])}>"
+    if name == "Dictionary":
+        return spark_type_for_arrow(t.args[1])
+    if name == "Struct":
+        fields = [f"`{f.name}`: {spark_type_for_arrow(f.type)}" for f in t.args]
+        return f"STRUCT<{', '.join(fields)}>"
+    if name == "Map":
+        entries = t.args[0]
+        key, value = entries.type.args
+        return f"MAP<{spark_type_for_arrow(key.type)}, {spark_type_for_arrow(value.type)}>"
+    if name in ("Time32", "Time64"):
+        unit = _arrow_unit(t)
+        if unit not in _TIME_PRECISION:
+            raise Skip("arrow_cast to nanoseconds, which Spark does not have")
+        return f"TIME({_TIME_PRECISION[unit]})"
+    if name == "Timestamp":
+        unit = _arrow_unit(t)
+        if unit != "us" or _arrow_time_zone(t) is not None:
+            raise Skip("arrow_cast to a nested timestamp that is not TIMESTAMP_NTZ")
+        return "TIMESTAMP_NTZ"
+    raise Skip(f"arrow_cast to {name}, which Spark does not have")
+
+
+def _strip_parens(tokens: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Drop whitespace, comments and parentheses that wrap the whole argument."""
+    tokens = [t for t in tokens if t[0] not in ("space", "comment")]
+    while len(tokens) >= 2 and tokens[0][1] == "(" and tokens[-1][1] == ")":
+        depth = 0
+        for k, (_, text) in enumerate(tokens):
+            depth += {"(": 1, ")": -1}.get(text, 0)
+            if depth == 0 and k < len(tokens) - 1:
+                return tokens
+        tokens = tokens[1:-1]
+    return tokens
+
+
+def _literal(tokens: list[tuple[str, str]]):
+    """Return ("null", None), ("string", text) or ("integer", n) for a literal argument."""
+    tokens = _strip_parens(tokens)
+    if len(tokens) == 1 and tokens[0][0] == "word" and tokens[0][1].upper() == "NULL":
+        return ("null", None)
+    if len(tokens) == 1 and tokens[0][0] == "string":
+        return ("string", tokens[0][1][1:-1].replace("''", "'"))
+    # A typed literal, such as DATE '2024-01-01' or TIMESTAMP '2024-01-01 10:00:00'
+    if (
+        len(tokens) == 2
+        and tokens[0][0] == "word"
+        and tokens[0][1].upper() in ("DATE", "TIMESTAMP", "TIMESTAMP_NTZ")
+        and tokens[1][0] == "string"
+    ):
+        return ("typed", tokens[1][1][1:-1].replace("''", "'"))
+    sign = 1
+    if len(tokens) == 2 and tokens[0][1] in ("-", "+"):
+        sign = -1 if tokens[0][1] == "-" else 1
+        tokens = tokens[1:]
+    if len(tokens) == 1 and tokens[0][0] == "number" and tokens[0][1].isdigit():
+        return ("integer", sign * int(tokens[0][1]))
+    return (None, None)
+
+
+# Fractional-second digits each timestamp unit keeps.
+_UNIT_DIGITS = {"s": 0, "ms": 3, "us": 6, "ns": 9}
+
+_FRACTION_RE = re.compile(r":\d{2}\.(\d+)")
+
+_EPOCH_FUNCTIONS = {"s": "timestamp_seconds", "ms": "timestamp_millis", "us": "timestamp_micros"}
+
+_MILLIS_PER_DAY = 86_400_000
+
+
+def _temporal_cast(t: ArrowType, arg: list[tuple[str, str]], arg_sql: str, time_zone: str) -> str:
+    """Translate arrow_cast to a date, time or timestamp, which depends on the argument."""
+    kind, value = _literal(arg)
+    if kind == "typed":
+        # DataFusion's TIMESTAMP literal has no time zone and Spark's is in the
+        # session time zone, so they are the same value only in UTC.
+        if time_zone not in _UTC_NAMES:
+            raise Skip(f"arrow_cast of a typed literal to {t.name} in a session time zone other than UTC")
+        kind = "string"
+        arg_sql = "'" + value.replace("'", "''") + "'"
+    if kind is None:
+        raise Skip(f"arrow_cast of an expression to {t.name}, which Arrow and Spark convert differently")
+    if t.name in ("Date32", "Date64"):
+        if kind == "integer":
+            days = value
+            if t.name == "Date64":
+                if value % _MILLIS_PER_DAY:
+                    raise Skip("arrow_cast to Date64 of milliseconds that are not whole days")
+                days = value // _MILLIS_PER_DAY
+            return f"date_from_unix_date({days})"
+        return f"CAST({arg_sql} AS DATE)"
+    if t.name in ("Time32", "Time64"):
+        spark_type = spark_type_for_arrow(t)
+        if kind == "integer":
+            raise Skip(f"arrow_cast of a number to {t.name}, which Spark cannot cast")
+        return f"CAST({arg_sql} AS {spark_type})"
+
+    # Timestamp
+    unit = _arrow_unit(t)
+    tz = _arrow_time_zone(t)
+    if tz is not None and not _same_time_zone(tz, time_zone):
+        raise Skip("arrow_cast to a timestamp in a time zone other than the session's")
+    # In a UTC session, Spark's TIMESTAMP holds the same values as an Arrow
+    # timestamp without a time zone, and functions such as unix_micros accept
+    # only TIMESTAMP, not TIMESTAMP_NTZ.
+    utc_session = time_zone in _UTC_NAMES
+    spark_type = "TIMESTAMP" if tz is not None or utc_session else "TIMESTAMP_NTZ"
+    if kind == "null":
+        return f"CAST(NULL AS {spark_type})"
+    if kind == "string":
+        m = _FRACTION_RE.search(value)
+        digits = len(m.group(1).rstrip("0")) if m else 0
+        if digits > 6:
+            raise Skip("arrow_cast to nanoseconds, which Spark does not have")
+        if digits > _UNIT_DIGITS[unit]:
+            raise Skip("arrow_cast that truncates a timestamp to seconds or milliseconds")
+        return f"CAST({arg_sql} AS {spark_type})"
+    # An integer counts units since the epoch.
+    if unit == "ns":
+        if value % 1000:
+            raise Skip("arrow_cast to nanoseconds, which Spark does not have")
+        value, unit = value // 1000, "us"
+    if tz is None and not utc_session:
+        # Spark would print the instant in the session time zone, and Arrow
+        # prints a timestamp without a time zone as UTC.
+        raise Skip("arrow_cast of a number to a timestamp in a session time zone other than UTC")
+    return f"{_EPOCH_FUNCTIONS[unit]}({value})"
+
+
+# Brackets that nest, so a comma inside `[1, 2]` or `f(a, b)` does not split arguments.
+_NESTING = {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}
+
+
+# Spark functions that return a DATE.
+_DATE_FUNCTIONS = {
+    "add_months",
+    "current_date",
+    "curdate",
+    "date_add",
+    "date_from_unix_date",
+    "date_sub",
+    "dateadd",
+    "last_day",
+    "make_date",
+    "next_day",
+    "to_date",
+    "trunc",
+}
+
+_INTEGER_TYPES = ("TINYINT", "SMALLINT", "INT", "BIGINT")
+
+
+def _is_date(sql: str) -> bool:
+    """Whether a translated expression is visibly a DATE: a DATE literal, a cast
+    to DATE, or a call to a function that returns one."""
+    tokens = _strip_parens(_tokenize(sql))
+    if len(tokens) == 2 and tokens[0][1].upper() == "DATE" and tokens[1][0] == "string":
+        return True
+    if len(tokens) < 3 or tokens[0][0] != "word" or tokens[1][1] != "(":
+        return False
+    if _matching_paren(tokens, 1) != len(tokens) - 1:
+        return False
+    name = tokens[0][1].lower()
+    if name == "cast":
+        inner = tokens[2:-1]
+        return len(inner) >= 2 and inner[-1][1].upper() == "DATE" and inner[-2][1].upper() == "AS"
+    return name in _DATE_FUNCTIONS
+
+
+def _matching_paren(tokens: list[tuple[str, str]], open_index: int) -> int:
+    depth = 0
+    for k in range(open_index, len(tokens)):
+        if tokens[k][0] == "other":
+            depth += _NESTING.get(tokens[k][1], 0)
+            if depth == 0:
+                return k
+    raise Skip("unbalanced parentheses")
+
+
+def rewrite_arrow_casts(sql: str, time_zone: str = "UTC") -> str:
+    """Replace each `arrow_cast(expr, 'Type')` with a Spark CAST, or raise Skip."""
     tokens = _tokenize(sql)
+    out = []
+    i = 0
+    while i < len(tokens):
+        kind, text = tokens[i]
+        open_index = _next_significant(tokens, i + 1)
+        if not (
+            kind == "word"
+            and text.lower() == "arrow_cast"
+            and open_index < len(tokens)
+            and tokens[open_index][1] == "("
+        ):
+            out.append(text)
+            i += 1
+            continue
+        close = _matching_paren(tokens, open_index)
+        args, start, depth = [], open_index + 1, 0
+        for k in range(open_index + 1, close):
+            if tokens[k][0] == "other":
+                if tokens[k][1] == "," and depth == 0:
+                    args.append(tokens[start:k])
+                    start = k + 1
+                depth += _NESTING.get(tokens[k][1], 0)
+        args.append(tokens[start:close])
+        if len(args) != 2:
+            raise Skip("arrow_cast without exactly two arguments")
+        type_arg = _strip_parens(args[1])
+        if len(type_arg) != 1 or type_arg[0][0] != "string":
+            raise Skip("arrow_cast to a type that is not a string literal")
+        try:
+            arrow_type = parse_arrow_type(type_arg[0][1][1:-1].replace("''", "'"))
+        except (ValueError, TypeError, AttributeError):
+            raise Skip("arrow_cast to a type this runner cannot parse")
+        arg_sql = rewrite_arrow_casts("".join(t for _, t in args[0]), time_zone).strip()
+        if arrow_type.name in ("Date32", "Date64", "Time32", "Time64", "Timestamp"):
+            out.append(_temporal_cast(arrow_type, args[0], arg_sql, time_zone))
+        else:
+            try:
+                spark_type = spark_type_for_arrow(arrow_type)
+            except (ValueError, TypeError, AttributeError, IndexError):
+                raise Skip("arrow_cast to a type this runner cannot parse")
+            if spark_type in _INTEGER_TYPES and _is_date(arg_sql):
+                # Arrow casts a date to an integer as days since the epoch.
+                # Spark's CAST returns NULL, and unix_date returns the days.
+                days = f"unix_date({arg_sql})"
+                out.append(days if spark_type == "INT" else f"CAST({days} AS {spark_type})")
+            else:
+                out.append(f"CAST({arg_sql} AS {spark_type})")
+        i = close + 1
+    return "".join(out)
+
+
+def translate(sql: str, time_zone: str = "UTC") -> str:
+    """Translate the parts of DataFusion's SQL that Spark spells differently."""
+    tokens = _tokenize(rewrite_arrow_casts(sql, time_zone))
     out = []
     # The function name before each open parenthesis, to find CAST(x AS type).
     calls: list[Optional[str]] = []
@@ -290,14 +702,14 @@ def _split_top_level(text: str) -> list[str]:
     return [p.strip() for p in parts]
 
 
-def translate_statement(sql: str) -> str:
+def translate_statement(sql: str, time_zone: str = "UTC") -> str:
     """Translate a statement, turning DataFusion tables into Spark temporary views."""
     m = _DROP_RE.match(sql)
     if m:
         return f"DROP VIEW IF EXISTS {m.group(1)}"
     m = _CREATE_RE.match(sql)
     if not m:
-        return translate(sql)
+        return translate(sql, time_zone)
     name, rest = m.group(1), sql[m.end() :]
     columns = None
     if rest.startswith("("):
@@ -313,7 +725,7 @@ def translate_statement(sql: str) -> str:
         raise Skip("CREATE TABLE without AS")
     query = rest[m.end() :].rstrip().rstrip(";")
     if columns is None:
-        return translate(f"CREATE OR REPLACE TEMPORARY VIEW {name} AS {query}")
+        return translate(f"CREATE OR REPLACE TEMPORARY VIEW {name} AS {query}", time_zone)
     names, casts = [], []
     for column in columns:
         parts = column.split(None, 1)
@@ -323,7 +735,8 @@ def translate_statement(sql: str) -> str:
         casts.append(f"CAST({parts[0]} AS {parts[1]}) AS {parts[0]}")
     return translate(
         f"CREATE OR REPLACE TEMPORARY VIEW {name} AS SELECT {', '.join(casts)} "
-        f"FROM ({query}) AS __slt_values({', '.join(names)})"
+        f"FROM ({query}) AS __slt_values({', '.join(names)})",
+        time_zone,
     )
 
 
@@ -898,9 +1311,9 @@ def run_record(runner: SparkRunner, record: Record) -> Outcome:
         return Outcome(record, "skip", f"{m.group(1).upper()} output differs between engines")
     try:
         if record.kind == "statement":
-            spark_sql = translate_statement(record.sql)
+            spark_sql = translate_statement(record.sql, runner.time_zone)
         else:
-            spark_sql = translate(record.sql)
+            spark_sql = translate(record.sql, runner.time_zone)
     except Skip as e:
         return Outcome(record, "skip", str(e))
     if any("<slt:ignore>" in line for line in record.expected):

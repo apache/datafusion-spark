@@ -106,6 +106,117 @@ class TranslateTest(unittest.TestCase):
             r.translate("SELECT 1::DECIMAL(76, 10)")
         self.assertEqual(r.translate("SELECT 1::DECIMAL(38, 10)"), "SELECT 1::DECIMAL(38, 10)")
 
+    def test_parse_arrow_type(self):
+        A, F = r.ArrowType, r.ArrowField
+        self.assertEqual(r.parse_arrow_type("Int32"), A("Int32"))
+        self.assertEqual(r.parse_arrow_type("Decimal128(10, 2)"), A("Decimal128", (10, 2)))
+        self.assertEqual(
+            r.parse_arrow_type('Timestamp(Nanosecond, Some("UTC"))'),
+            A("Timestamp", (A("Nanosecond"), A("Some", ("UTC",)))),
+        )
+        self.assertEqual(r.parse_arrow_type("Timestamp(µs)"), A("Timestamp", (A("µs"),)))
+        self.assertEqual(r.parse_arrow_type("List(non-null Int64)"), A("List", (A("Int64"),)))
+        self.assertEqual(
+            r.parse_arrow_type('Struct("a": Int64, "b": Utf8)'),
+            A("Struct", (F("a", A("Int64")), F("b", A("Utf8")))),
+        )
+        with self.assertRaises(ValueError):
+            r.parse_arrow_type("Int32)")
+
+    def test_arrow_cast(self):
+        cases = {
+            "SELECT arrow_cast(1, 'Int8')": "SELECT CAST(1 AS TINYINT)",
+            "SELECT ARROW_CAST('a', 'LargeUtf8')": "SELECT CAST('a' AS STRING)",
+            "SELECT arrow_cast(x'01', 'BinaryView')": "SELECT CAST(x'01' AS BINARY)",
+            "SELECT arrow_cast(1, 'Decimal256(20, 3)')": "SELECT CAST(1 AS DECIMAL(20, 3))",
+            "SELECT arrow_cast(column1, 'Dictionary(Int32, Utf8)') FROM t":
+                "SELECT CAST(col1 AS STRING) FROM t",
+            "SELECT arrow_cast(make_array(1, 2), 'LargeList(Int64)')":
+                "SELECT CAST(make_array(1, 2) AS ARRAY<BIGINT>)",
+            "SELECT arrow_cast([1, 2], 'FixedSizeList(2, Int64)')":
+                "SELECT CAST([1, 2] AS ARRAY<BIGINT>)",
+            """SELECT arrow_cast(s, 'Struct("a": Int64, "b": Utf8)')""":
+                "SELECT CAST(s AS STRUCT<`a`: BIGINT, `b`: STRING>)",
+            """SELECT arrow_cast(m, 'Map("entries": non-null Struct("key": non-null Utf8, "value": Int64), unsorted)')""":
+                "SELECT CAST(m AS MAP<STRING, BIGINT>)",
+            # Nested calls are translated from the inside out.
+            "SELECT arrow_cast(arrow_cast(1, 'Int8'), 'Int64')":
+                "SELECT CAST(CAST(1 AS TINYINT) AS BIGINT)",
+            # A string that mentions arrow_cast is left alone.
+            "SELECT 'arrow_cast(1, ''Int8'')'": "SELECT 'arrow_cast(1, ''Int8'')'",
+        }
+        for sql, expected in cases.items():
+            with self.subTest(sql=sql):
+                self.assertEqual(r.translate(sql), expected)
+
+    def test_arrow_cast_temporal(self):
+        cases = {
+            "SELECT arrow_cast('2024-01-01', 'Date64')": "SELECT CAST('2024-01-01' AS DATE)",
+            "SELECT arrow_cast(1, 'Date32')": "SELECT date_from_unix_date(1)",
+            "SELECT arrow_cast(86400000, 'Date64')": "SELECT date_from_unix_date(1)",
+            "SELECT arrow_cast('10:00:00', 'Time64(Microsecond)')": "SELECT CAST('10:00:00' AS TIME(6))",
+            "SELECT arrow_cast(NULL, 'Timestamp(ns)')": "SELECT CAST(NULL AS TIMESTAMP)",
+            "SELECT arrow_cast('2024-01-01 10:00:00.123', 'Timestamp(Millisecond, None)')":
+                "SELECT CAST('2024-01-01 10:00:00.123' AS TIMESTAMP)",
+            "SELECT arrow_cast(1703512245, 'Timestamp(s)')":
+                "SELECT timestamp_seconds(1703512245)",
+            "SELECT arrow_cast(-1000000000, 'Timestamp(Nanosecond, None)')":
+                "SELECT timestamp_micros(-1000000)",
+            """SELECT arrow_cast(-1, 'Timestamp(Millisecond, Some("UTC"))')""":
+                "SELECT timestamp_millis(-1)",
+            """SELECT arrow_cast(timestamp '2024-07-15T03:30:00', 'Timestamp(µs, "UTC")')""":
+                "SELECT CAST('2024-07-15T03:30:00' AS TIMESTAMP)",
+        }
+        for sql, expected in cases.items():
+            with self.subTest(sql=sql):
+                self.assertEqual(r.translate(sql), expected)
+
+    def test_arrow_cast_skips(self):
+        cases = {
+            "SELECT arrow_cast(1, 'UInt8')": "unsigned integer",
+            "SELECT arrow_cast(1.5, 'Float16')": "Float16",
+            "SELECT arrow_cast(1, 'Decimal256(76, 2)')": "DECIMAL precision",
+            "SELECT arrow_cast(1, 'Duration(Second)')": "Duration",
+            "SELECT arrow_cast(1, t)": "not a string literal",
+            "SELECT arrow_cast(1, 'Int32(')": "cannot parse",
+            "SELECT arrow_cast(-1, 'Timestamp(Nanosecond, None)')": "nanoseconds",
+            "SELECT arrow_cast('2024-01-01 00:00:00.5', 'Timestamp(Second, None)')": "truncates",
+            "SELECT arrow_cast(c, 'Timestamp(Microsecond, None)') FROM t": "expression",
+            """SELECT arrow_cast('2024-01-01', 'Timestamp(Microsecond, Some("Asia/Seoul"))')""":
+                "time zone other than the session's",
+            "SELECT arrow_cast(19716, 'Date64')": "whole days",
+            "SELECT arrow_cast(52245, 'Time32(Second)')": "Spark cannot cast",
+        }
+        for sql, reason in cases.items():
+            with self.subTest(sql=sql):
+                with self.assertRaisesRegex(r.Skip, reason):
+                    r.translate(sql)
+
+    def test_arrow_cast_date_to_integer(self):
+        cases = {
+            "SELECT arrow_cast(next_day(arrow_cast(1, 'Date32'), 'Mon'), 'Int32')":
+                "SELECT unix_date(next_day(date_from_unix_date(1), 'Mon'))",
+            "SELECT arrow_cast(DATE '2024-01-01', 'Int64')":
+                "SELECT CAST(unix_date(DATE '2024-01-01') AS BIGINT)",
+            "SELECT arrow_cast(CAST(x AS DATE), 'Int32')": "SELECT unix_date(CAST(x AS DATE))",
+            # Not visibly a date, so it stays a CAST.
+            "SELECT arrow_cast(abs(x), 'Int32')": "SELECT CAST(abs(x) AS INT)",
+        }
+        for sql, expected in cases.items():
+            with self.subTest(sql=sql):
+                self.assertEqual(r.translate(sql), expected)
+
+    def test_arrow_cast_session_time_zone(self):
+        sql = """SELECT arrow_cast('2024-01-01', 'Timestamp(Microsecond, Some("Asia/Seoul"))')"""
+        self.assertEqual(r.translate(sql, "Asia/Seoul"), "SELECT CAST('2024-01-01' AS TIMESTAMP)")
+        # Outside UTC, a timestamp without a time zone keeps its wall-clock value.
+        self.assertEqual(
+            r.translate("SELECT arrow_cast('2024-01-01', 'Timestamp(µs)')", "Asia/Seoul"),
+            "SELECT CAST('2024-01-01' AS TIMESTAMP_NTZ)",
+        )
+        with self.assertRaisesRegex(r.Skip, "other than UTC"):
+            r.translate("SELECT arrow_cast(1, 'Timestamp(s)')", "Asia/Seoul")
+
     def test_create_table(self):
         self.assertEqual(
             r.translate_statement("CREATE TABLE t AS VALUES (1, 'a')"),
