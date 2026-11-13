@@ -217,6 +217,21 @@ class TranslateTest(unittest.TestCase):
         with self.assertRaisesRegex(r.Skip, "other than UTC"):
             r.translate("SELECT arrow_cast(1, 'Timestamp(s)')", "Asia/Seoul")
 
+    def test_spark_cast(self):
+        cases = {
+            "SELECT spark_cast(arrow_cast(1, 'Int8'), 'timestamp')":
+                "SELECT CAST(CAST(1 AS TINYINT) AS timestamp)",
+            "SELECT spark_cast(1.5, 'decimal(10, 2)')": "SELECT CAST(1.5 AS decimal(10, 2))",
+            "SELECT SPARK_CAST(column1, 'array<int>') FROM t": "SELECT CAST(col1 AS array<int>) FROM t",
+        }
+        for sql, expected in cases.items():
+            with self.subTest(sql=sql):
+                self.assertEqual(r.translate(sql), expected)
+        with self.assertRaisesRegex(r.Skip, "not a string literal"):
+            r.translate("SELECT spark_cast(1, t)")
+        with self.assertRaisesRegex(r.Skip, "not a Spark type name"):
+            r.translate("SELECT spark_cast(1, 'int; DROP')")
+
     def test_create_table(self):
         self.assertEqual(
             r.translate_statement("CREATE TABLE t AS VALUES (1, 'a')"),

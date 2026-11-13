@@ -89,6 +89,8 @@ makes only these changes:
   `FLOAT8` to `DOUBLE` and `TEXT` to `STRING`
 - `column1`, `column2`, ... become `col1`, `col2`, ..., which is how Spark names
   `VALUES` columns
+- `spark_cast(x, 'type')`, this crate's emulation of Spark's `CAST`, becomes
+  `CAST(x AS type)`
 - `arrow_cast(x, 'Type')` becomes `CAST(x AS type)` when the Arrow type has the
   same values as a Spark type. Types that differ only in their physical layout
   map to one Spark type: `Utf8`, `LargeUtf8` and `Utf8View` are all `STRING`,

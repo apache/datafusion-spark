@@ -170,9 +170,9 @@ def parse_slt(path: Path) -> list[Record]:
 # Translating DataFusion SQL to Spark SQL
 #
 # Spark 4.2 parses most of these files as written, including `::` casts.
-# Only a few renames are applied here, and `arrow_cast` becomes a CAST (see
-# below). Anything else Spark cannot parse, and any function Spark does not
-# have (such as `arrow_typeof`), is skipped.
+# Only a few renames are applied here, and `arrow_cast` and `spark_cast`
+# become a CAST (see below). Anything else Spark cannot parse, and any function
+# Spark does not have (such as `arrow_typeof`), is skipped.
 # ---------------------------------------------------------------------------
 
 _TOKEN_RE = re.compile(
@@ -579,17 +579,69 @@ def _matching_paren(tokens: list[tuple[str, str]], open_index: int) -> int:
     raise Skip("unbalanced parentheses")
 
 
-def rewrite_arrow_casts(sql: str, time_zone: str = "UTC") -> str:
-    """Replace each `arrow_cast(expr, 'Type')` with a Spark CAST, or raise Skip."""
+# A Spark type name, such as `timestamp`, `decimal(10, 2)` or `array<int>`.
+_SPARK_TYPE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_<>(),:`\s]*")
+
+
+def _call_args(tokens: list[tuple[str, str]], open_index: int, close: int) -> list:
+    """Split the tokens between a call's parentheses on top-level commas."""
+    args, start, depth = [], open_index + 1, 0
+    for k in range(open_index + 1, close):
+        if tokens[k][0] == "other":
+            if tokens[k][1] == "," and depth == 0:
+                args.append(tokens[start:k])
+                start = k + 1
+            depth += _NESTING.get(tokens[k][1], 0)
+    args.append(tokens[start:close])
+    return args
+
+
+def _type_string(name: str, args: list) -> str:
+    """The type argument of arrow_cast or spark_cast, which must be a string literal."""
+    if len(args) != 2:
+        raise Skip(f"{name} without exactly two arguments")
+    type_arg = _strip_parens(args[1])
+    if len(type_arg) != 1 or type_arg[0][0] != "string":
+        raise Skip(f"{name} to a type that is not a string literal")
+    return type_arg[0][1][1:-1].replace("''", "'")
+
+
+def _arrow_cast(arg: list, arg_sql: str, type_string: str, time_zone: str) -> str:
+    try:
+        arrow_type = parse_arrow_type(type_string)
+    except (ValueError, TypeError, AttributeError):
+        raise Skip("arrow_cast to a type this runner cannot parse")
+    if arrow_type.name in ("Date32", "Date64", "Time32", "Time64", "Timestamp"):
+        return _temporal_cast(arrow_type, arg, arg_sql, time_zone)
+    try:
+        spark_type = spark_type_for_arrow(arrow_type)
+    except (ValueError, TypeError, AttributeError, IndexError):
+        raise Skip("arrow_cast to a type this runner cannot parse")
+    if spark_type in _INTEGER_TYPES and _is_date(arg_sql):
+        # Arrow casts a date to an integer as days since the epoch.
+        # Spark's CAST returns NULL, and unix_date returns the days.
+        days = f"unix_date({arg_sql})"
+        return days if spark_type == "INT" else f"CAST({days} AS {spark_type})"
+    return f"CAST({arg_sql} AS {spark_type})"
+
+
+def rewrite_casts(sql: str, time_zone: str = "UTC") -> str:
+    """Replace each `arrow_cast(expr, 'Type')` and `spark_cast(expr, 'type')`
+    with a Spark CAST, or raise Skip.
+
+    `spark_cast` is this crate's emulation of Spark's CAST, and its second
+    argument is already a Spark type name.
+    """
     tokens = _tokenize(sql)
     out = []
     i = 0
     while i < len(tokens):
         kind, text = tokens[i]
+        name = text.lower()
         open_index = _next_significant(tokens, i + 1)
         if not (
             kind == "word"
-            and text.lower() == "arrow_cast"
+            and name in ("arrow_cast", "spark_cast")
             and open_index < len(tokens)
             and tokens[open_index][1] == "("
         ):
@@ -597,45 +649,22 @@ def rewrite_arrow_casts(sql: str, time_zone: str = "UTC") -> str:
             i += 1
             continue
         close = _matching_paren(tokens, open_index)
-        args, start, depth = [], open_index + 1, 0
-        for k in range(open_index + 1, close):
-            if tokens[k][0] == "other":
-                if tokens[k][1] == "," and depth == 0:
-                    args.append(tokens[start:k])
-                    start = k + 1
-                depth += _NESTING.get(tokens[k][1], 0)
-        args.append(tokens[start:close])
-        if len(args) != 2:
-            raise Skip("arrow_cast without exactly two arguments")
-        type_arg = _strip_parens(args[1])
-        if len(type_arg) != 1 or type_arg[0][0] != "string":
-            raise Skip("arrow_cast to a type that is not a string literal")
-        try:
-            arrow_type = parse_arrow_type(type_arg[0][1][1:-1].replace("''", "'"))
-        except (ValueError, TypeError, AttributeError):
-            raise Skip("arrow_cast to a type this runner cannot parse")
-        arg_sql = rewrite_arrow_casts("".join(t for _, t in args[0]), time_zone).strip()
-        if arrow_type.name in ("Date32", "Date64", "Time32", "Time64", "Timestamp"):
-            out.append(_temporal_cast(arrow_type, args[0], arg_sql, time_zone))
+        args = _call_args(tokens, open_index, close)
+        type_string = _type_string(name, args)
+        arg_sql = rewrite_casts("".join(t for _, t in args[0]), time_zone).strip()
+        if name == "arrow_cast":
+            out.append(_arrow_cast(args[0], arg_sql, type_string, time_zone))
         else:
-            try:
-                spark_type = spark_type_for_arrow(arrow_type)
-            except (ValueError, TypeError, AttributeError, IndexError):
-                raise Skip("arrow_cast to a type this runner cannot parse")
-            if spark_type in _INTEGER_TYPES and _is_date(arg_sql):
-                # Arrow casts a date to an integer as days since the epoch.
-                # Spark's CAST returns NULL, and unix_date returns the days.
-                days = f"unix_date({arg_sql})"
-                out.append(days if spark_type == "INT" else f"CAST({days} AS {spark_type})")
-            else:
-                out.append(f"CAST({arg_sql} AS {spark_type})")
+            if not _SPARK_TYPE_RE.fullmatch(type_string.strip()):
+                raise Skip("spark_cast to a type that is not a Spark type name")
+            out.append(f"CAST({arg_sql} AS {type_string.strip()})")
         i = close + 1
     return "".join(out)
 
 
 def translate(sql: str, time_zone: str = "UTC") -> str:
     """Translate the parts of DataFusion's SQL that Spark spells differently."""
-    tokens = _tokenize(rewrite_arrow_casts(sql, time_zone))
+    tokens = _tokenize(rewrite_casts(sql, time_zone))
     out = []
     # The function name before each open parenthesis, to find CAST(x AS type).
     calls: list[Optional[str]] = []
