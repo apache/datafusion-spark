@@ -139,30 +139,42 @@ SELECT
 {outer_key1: {inner_a: 1, inner_b: 2}, outer_key2: {inner_x: 10, inner_y: 20, inner_z: 30}}
 
 # Test with duplicate keys: raises DUPLICATED_MAP_KEY under Spark's default policy
-query error DataFusion error: Execution error: \[DUPLICATED_MAP_KEY\] Duplicate map key true was found
+query error
 SELECT map_from_entries(array(
-    struct(true, 'a'), 
-    struct(false, 'b'), 
+    struct(true, 'a'),
+    struct(false, 'b'),
     struct(true, 'c'),
-    struct(false, cast(NULL as string)), 
+    struct(false, cast(NULL as string)),
     struct(true, 'd')
 ));
+----
+DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key true was found
+
 
 # Integer keys with a duplicate also raise DUPLICATED_MAP_KEY.
-query error DataFusion error: Execution error: \[DUPLICATED_MAP_KEY\] Duplicate map key 1 was found
+query error
 SELECT map_from_entries(array(struct(1, 'a'), struct(2, 'b'), struct(1, 'c')));
+----
+DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key 1 was found
+
 
 # String keys with triple occurrence also raise DUPLICATED_MAP_KEY.
-query error DataFusion error: Execution error: \[DUPLICATED_MAP_KEY\] Duplicate map key k was found
+query error
 SELECT map_from_entries(array(struct('k', 1), struct('k', 2), struct('k', 3)));
+----
+DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key k was found
+
 
 # Multi-row: a clean row followed by a duplicate row still errors.
-query error DataFusion error: Execution error: \[DUPLICATED_MAP_KEY\] Duplicate map key 1 was found
+query error
 SELECT map_from_entries(data)
 FROM values
     (array[struct(1, 'a'), struct(2, 'b')]),
     (array[struct(1, 'x'), struct(1, 'y')])
 AS tab(data);
+----
+DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key 1 was found
+
 
 # LAST_WIN policy: duplicates are allowed; later occurrences overwrite earlier ones.
 statement ok

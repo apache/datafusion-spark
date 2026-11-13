@@ -86,8 +86,11 @@ statement error DataFusion error: Arrow error: Divide by zero error
 SELECT pmod(10.5::float8, -0.0::float8);
 
 # A decimal result that does not fit raises instead of returning NULL
-statement error DataFusion error: Arrow error: Invalid argument error: 9999\.8 is too large to store in a Decimal128 of precision 3
+statement error
 SELECT pmod(-0.1::decimal(3,1), 9999.9::decimal(5,1));
+----
+DataFusion error: Arrow error: Invalid argument error: 9999.8 is too large to store in a Decimal128 of precision 3
+
 
 # A NULL dividend short-circuits to NULL before the divisor is validated
 query I
