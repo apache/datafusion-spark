@@ -30,17 +30,16 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::utils::take_function_args;
-use datafusion_common::{Column, Result, ScalarValue, exec_datafusion_err, plan_err};
+use datafusion_common::{Result, ScalarValue, exec_datafusion_err, plan_err};
 use datafusion_expr::{
-    ColumnarValue, Expr, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility, lit,
+    ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
 };
-use datafusion_functions::core::expr_fn::named_struct;
 
 /// Spark-compatible version of the [to_json] function.
 ///
 /// Serializes a struct value to a JSON string, one JSON object per row.
 /// Differs from arrow-json's default output in the Spark-specific rules
-/// listed below, which are implemented by `spark_encoder_options`.
+/// listed below, which are implemented by `SparkJsonEncoderFactory`.
 ///
 /// [to_json]: https://spark.apache.org/docs/latest/api/sql/index.html#to_json
 ///
@@ -155,7 +154,6 @@ impl ScalarUDFImpl for SparkToJson {
     }
 }
 
-/// Serializes a struct array with Spark's output rules.
 /// Rejects types that have no faithful Spark JSON text. `path` names the
 /// field in the error (`a.b[]` for the elements of list `b` in struct `a`).
 fn check_spark_json_type(data_type: &DataType, path: &str) -> Result<()> {
@@ -199,21 +197,14 @@ fn check_spark_json_type(data_type: &DataType, path: &str) -> Result<()> {
     }
 }
 
+/// Serializes every row of a struct array as a JSON object string; a NULL
+/// struct row produces NULL. `field` describes `array` and supplies the JSON
+/// keys of nested fields.
 fn struct_to_json(
     field: &FieldRef,
     array: &ArrayRef,
     config: &ConfigOptions,
 ) -> Result<ArrayRef> {
-    encode_struct_rows(field, array, &spark_encoder_options(config)?)
-}
-
-/// arrow-json options that reproduce Spark's `to_json` output.
-///
-/// This is the only Spark-specific input to the serialization: everything
-/// else (`encode_struct_rows`, `IntoJsonStruct`, the UDF plumbing) is
-/// independent of the output flavor and can be shared with other `to_json`
-/// variants, e.g. a Postgres-style one with explicit nulls.
-fn spark_encoder_options(config: &ConfigOptions) -> Result<EncoderOptions> {
     // Spark writes TIMESTAMP values in the session time zone
     let session_tz: Tz = config
         .execution
@@ -222,29 +213,12 @@ fn spark_encoder_options(config: &ConfigOptions) -> Result<EncoderOptions> {
         .map(|tz| tz.as_str())
         .unwrap_or("+00:00")
         .parse()?;
-
-    Ok(EncoderOptions::default()
+    let options = EncoderOptions::default()
         // Spark default: ignoreNullFields = true -> NULL struct fields are omitted
         .with_explicit_nulls(false)
-        // where Spark's output differs from arrow's defaults: NULL map entries
-        // are kept, map keys are strings, binary is Base64, non-finite floats
-        // are strings, timestamps use Spark's format (see `SparkJsonEncoderFactory`)
-        .with_encoder_factory(Arc::new(SparkJsonEncoderFactory { session_tz })))
-}
+        .with_encoder_factory(Arc::new(SparkJsonEncoderFactory { session_tz }));
 
-/// Encodes every row of a struct array as a JSON object string using the
-/// given arrow-json options, one output string per input row.
-///
-/// `field` describes `array` (its name and the nested field names/types are
-/// what the encoder uses for the JSON keys). A NULL struct row produces a
-/// NULL output; everything else about the output is decided by `options`,
-/// which makes this loop independent of the JSON flavor.
-fn encode_struct_rows(
-    field: &FieldRef,
-    array: &ArrayRef,
-    options: &EncoderOptions,
-) -> Result<ArrayRef> {
-    let mut encoder = make_encoder(field, array.as_ref(), options)?;
+    let mut encoder = make_encoder(field, array.as_ref(), &options)?;
     let mut builder = StringBuilder::with_capacity(array.len(), array.len() * 32);
     let mut buf: Vec<u8> = Vec::with_capacity(128);
     for row in 0..array.len() {
@@ -949,41 +923,6 @@ impl Encoder for SparkMapEncoder<'_> {
     }
 }
 
-/// Input accepted by the to_json expression builder.
-///
-/// Implemented for an expression that evaluates to a struct, such as a struct column or a `named_struct` call,
-/// which is used as-is; and for a slice or array of column names, which are packed into a struct first.
-/// In the second form the JSON keys are the plain column names without any table qualifier.
-pub trait IntoJsonStruct {
-    /// Converts self into the struct-valued [`Expr`] to serialize.
-    fn into_struct_expr(self) -> Expr;
-}
-
-impl IntoJsonStruct for Expr {
-    fn into_struct_expr(self) -> Expr {
-        self
-    }
-}
-
-impl<S: AsRef<str>> IntoJsonStruct for &[S] {
-    fn into_struct_expr(self) -> Expr {
-        let args = self
-            .iter()
-            .flat_map(|name| {
-                let column = Column::from_qualified_name(name.as_ref());
-                [lit(column.name().to_owned()), Expr::Column(column)]
-            })
-            .collect();
-        named_struct(args)
-    }
-}
-
-impl<S: AsRef<str>, const N: usize> IntoJsonStruct for &[S; N] {
-    fn into_struct_expr(self) -> Expr {
-        self.as_slice().into_struct_expr()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1246,28 +1185,6 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_struct_rows_is_independent_of_the_json_flavor() {
-        // The output flavor is decided entirely by the options: the same loop
-        // with explicit nulls (what a Postgres-style `to_json` would use)
-        // keeps the NULL fields that the Spark options omit.
-        let input = sample_struct();
-        let field = field_of(&input);
-        let array = Arc::new(input) as ArrayRef;
-
-        let spark_options = spark_encoder_options(&ConfigOptions::default()).unwrap();
-        let spark = encode_struct_rows(&field, &array, &spark_options).unwrap();
-        let spark = as_string_array(&spark).unwrap();
-        assert_eq!(spark.value(1), r#"{"a":2,"c":false}"#);
-
-        let explicit = EncoderOptions::default().with_explicit_nulls(true);
-        let other = encode_struct_rows(&field, &array, &explicit).unwrap();
-        let other = as_string_array(&other).unwrap();
-        assert_eq!(other.value(1), r#"{"a":2,"b":null,"c":false}"#);
-        // a NULL struct row is NULL in both
-        assert!(spark.is_null(2) && other.is_null(2));
-    }
-
-    #[test]
     fn test_scalar_input() {
         let input = sample_struct();
         let field = field_of(&input);
@@ -1377,54 +1294,6 @@ mod tests {
         let out = as_string_array(&out).unwrap();
 
         assert_eq!(out.value(0), r#"{"a":"he said \"hi\"\n"}"#);
-    }
-    /// Unwraps a named_struct(...) call and returns its arguments.
-    fn named_struct_args(expr: &Expr) -> &[Expr] {
-        match expr {
-            Expr::ScalarFunction(f) if f.func.name() == "named_struct" => &f.args,
-            other => panic!("expected named_struct call, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_into_json_struct_passes_expr_through() {
-        let expr = Expr::Column(Column::from_name("event"));
-        assert_eq!(expr.clone().into_struct_expr(), expr);
-    }
-
-    #[test]
-    fn test_into_json_struct_from_column_names() {
-        let expr = ["foo", "bar"].into_struct_expr();
-        let args = named_struct_args(&expr);
-
-        assert_eq!(
-            args,
-            &[
-                lit("foo"),
-                Expr::Column(Column::from_name("foo")),
-                lit("bar"),
-                Expr::Column(Column::from_name("bar")),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_into_json_struct_accepts_slice_and_strings() {
-        let names: Vec<String> = vec!["foo".to_string(), "bar".to_string()];
-        let from_vec = names.as_slice().into_struct_expr();
-        let from_array = ["foo", "bar"].into_struct_expr();
-        assert_eq!(from_vec, from_array);
-    }
-
-    #[test]
-    fn test_into_json_struct_uses_unqualified_key_for_qualified_column() {
-        let expr = ["t.foo"].into_struct_expr();
-        let args = named_struct_args(&expr);
-
-        // JSON key is the bare column name...
-        assert_eq!(args[0], lit("foo"));
-        // ...while the column reference keeps its qualifier
-        assert_eq!(args[1], Expr::Column(Column::from_qualified_name("t.foo")));
     }
 
     #[test]
@@ -2102,7 +1971,15 @@ mod dataframe_tests {
 
     #[tokio::test]
     async fn with_column_to_json() -> Result<()> {
-        let df = sample_frame()?.with_column("json", to_json(&["foo", "bar"]))?;
+        let df = sample_frame()?.with_column(
+            "json",
+            to_json(named_struct(vec![
+                lit("foo"),
+                col("foo"),
+                lit("bar"),
+                col("bar"),
+            ])),
+        )?;
 
         // check that the new column is a nullable string
         let json_field = df.schema().field_with_unqualified_name("json")?;
@@ -2127,7 +2004,15 @@ mod dataframe_tests {
         // source columns into a single JSON column
         let df_results_overwrite = df
             .clone()
-            .with_column("foo", to_json(&["foo", "bar"]))?
+            .with_column(
+                "foo",
+                to_json(named_struct(vec![
+                    lit("foo"),
+                    col("foo"),
+                    lit("bar"),
+                    col("bar"),
+                ])),
+            )?
             .collect()
             .await?;
         assert_batches_sorted_eq!(
@@ -2144,7 +2029,7 @@ mod dataframe_tests {
         );
 
         // check that an existing struct column can be serialized with col(..),
-        // and that it gives the same result as packing the columns by name
+        // with the same result as serializing the struct expression directly
         let df_struct_col = df
             .clone()
             .with_column(
@@ -2210,7 +2095,10 @@ mod dataframe_tests {
             "a" => [Some(1_i32), None],
             "b" => [None, None::<&str>],
         )?
-        .with_column("json", to_json(&["a", "b"]))?;
+        .with_column(
+            "json",
+            to_json(named_struct(vec![lit("a"), col("a"), lit("b"), col("b")])),
+        )?;
         assert_batches_sorted_eq!(
             [
                 "+---+---+---------+",
@@ -2262,7 +2150,7 @@ mod dataframe_tests {
 
         // string values are JSON-escaped; non-ASCII is emitted as-is
         let df = dataframe!("s" => [r#"he said "hi""#, r"a\b", "π"])?
-            .with_column("json", to_json(&["s"]))?;
+            .with_column("json", to_json(named_struct(vec![lit("s"), col("s")])))?;
         assert_batches_sorted_eq!(
             [
                 "+--------------+------------------------+",
@@ -2276,53 +2164,22 @@ mod dataframe_tests {
             &df.collect().await?
         );
 
-        // a qualified column name is resolved as such, but the JSON key is the
-        // bare column name
-        let ctx = SessionContext::new();
-        let df = ctx
-            .sql("SELECT * FROM (VALUES (1, 'x')) AS t(foo, bar)")
-            .await?
-            .with_column("json", to_json(&["t.foo", "bar"]))?
-            .select(vec![col("json")])?;
-        assert_batches_sorted_eq!(
-            [
-                "+---------------------+",
-                "| json                |",
-                "+---------------------+",
-                "| {\"foo\":1,\"bar\":\"x\"} |",
-                "+---------------------+",
-            ],
-            &df.collect().await?
-        );
-
         // an empty input produces no rows but still carries the new column
         let df = sample_frame()?
             .filter(col("foo").gt(lit(100)))?
-            .with_column("json", to_json(&["foo"]))?;
+            .with_column("json", to_json(named_struct(vec![lit("foo"), col("foo")])))?;
         assert_eq!(
             df.schema().field_with_unqualified_name("json")?.data_type(),
             &DataType::Utf8
         );
         assert_eq!(df.count().await?, 0);
 
-        // an empty column list cannot build a struct and fails when planning
-        // (rejected by the named_struct signature check)
-        let err = dataframe!("a" => [1_i32])?
-            .with_column("json", to_json(&[] as &[&str]))
-            .unwrap_err()
-            .to_string();
-        assert_contains!(err, "'named_struct' does not support zero arguments");
-
         Ok(())
     }
 
-    /// Evaluates `SELECT to_json(<expr>)` for each `(expr, expected)` pair and
-    /// checks the JSON string.
-    ///
-    /// The `datafusion` dev-dependency is built without the
-    /// `nested_expressions` feature, so the nested functions used to build
-    /// test values (`make_array`, `map`, ...) are registered here explicitly.
-    /// A context with to_json and the nested functions (map, make_array).
+    /// A context with to_json and the nested functions used to build test
+    /// values (`map`, `make_array`, ...; the `datafusion` dev-dependency is
+    /// built without the `nested_expressions` feature).
     fn to_json_ctx() -> SessionContext {
         let ctx = SessionContext::new();
         ctx.register_udf((*crate::function::json::to_json()).clone());
@@ -2332,6 +2189,8 @@ mod dataframe_tests {
         ctx
     }
 
+    /// Evaluates `SELECT to_json(<expr>)` for each `(expr, expected)` pair and
+    /// checks the JSON string.
     async fn assert_sql_json(cases: &[(&str, &str)]) -> Result<()> {
         let ctx = to_json_ctx();
         for (expr, expected) in cases {
