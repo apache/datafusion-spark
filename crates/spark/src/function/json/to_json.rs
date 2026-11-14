@@ -13,7 +13,8 @@ use arrow::array::{
 use arrow::buffer::OffsetBuffer;
 use arrow::compute::cast;
 use arrow::datatypes::{
-    ArrowPrimitiveType, ArrowTimestampType, DataType, FieldRef, Float32Type, Float64Type,
+    ArrowPrimitiveType, ArrowTimestampType, DataType, Decimal32Type, Decimal64Type,
+    Decimal128Type, Decimal256Type, DecimalType, FieldRef, Float32Type, Float64Type,
     TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
     TimestampNanosecondType, TimestampSecondType,
 };
@@ -52,6 +53,10 @@ use datafusion_functions::core::expr_fn::named_struct;
 ///   plain decimal with at least one fraction digit for `1e-3 <= |x| < 1e7`
 ///   (`1.0`, `0.001`), scientific notation otherwise (`1.0E-5`, `1.23456789E8`);
 ///   non-finite values are the strings `"NaN"`, `"Infinity"` and `"-Infinity"`
+/// - Decimals are written like Java's `BigDecimal.toString`, keeping the
+///   declared scale: `1.50`, `0.000001`, and scientific notation when the
+///   adjusted exponent is below -6 (`0E-10`, `1.0E-7`). These are unquoted
+///   JSON numbers, as Spark writes them.
 /// - Timestamps are written as `yyyy-MM-dd'T'HH:mm:ss.SSS` (milliseconds,
 ///   truncated). A timestamp with a time zone is an instant and is written in
 ///   the session time zone (`datafusion.execution.time_zone`, UTC by default)
@@ -239,6 +244,22 @@ impl EncoderFactory for SparkJsonEncoderFactory {
             ))),
             DataType::Float64 => Ok(Some(spark_float_encoder(
                 array.as_primitive::<Float64Type>(),
+            ))),
+            // Spark writes decimals like Java's BigDecimal.toString (0E-10, 1.0E-7);
+            // arrow-json writes them padded to the scale (0.0000000000). Spark data
+            // maps to Decimal128 (precision <= 38); the other Arrow decimal widths
+            // are formatted the same way rather than rejected.
+            DataType::Decimal32(_, _) => Ok(Some(spark_decimal_encoder(
+                array.as_primitive::<Decimal32Type>(),
+            ))),
+            DataType::Decimal64(_, _) => Ok(Some(spark_decimal_encoder(
+                array.as_primitive::<Decimal64Type>(),
+            ))),
+            DataType::Decimal128(_, _) => Ok(Some(spark_decimal_encoder(
+                array.as_primitive::<Decimal128Type>(),
+            ))),
+            DataType::Decimal256(_, _) => Ok(Some(spark_decimal_encoder(
+                array.as_primitive::<Decimal256Type>(),
             ))),
             // Spark writes timestamps as yyyy-MM-dd'T'HH:mm:ss.SSS, instants in
             // the session time zone with their offset; arrow-json keeps the full
@@ -449,6 +470,80 @@ impl<N: SparkFloat> Encoder for SparkFloatEncoder<'_, N> {
     }
 }
 
+/// Formats a decimal the way Java's `BigDecimal.toString` does, which is what
+/// Spark's `to_json` writes. `unscaled` is the signed unscaled value as text.
+///
+/// With `adjusted = -scale + (digits - 1)`: plain notation when `scale >= 0`
+/// and `adjusted >= -6` (`1.50`, `0.000001`), scientific notation otherwise
+/// (`0E-10`, `1.0E-7`, `1.23E+4`; the exponent always carries a sign). Both
+/// forms are valid JSON numbers, so they are written unquoted.
+fn java_big_decimal_text(unscaled: &str, scale: i8) -> String {
+    let (sign, coefficient) = match unscaled.strip_prefix('-') {
+        Some(coefficient) => ("-", coefficient),
+        None => ("", unscaled),
+    };
+    let adjusted = -(scale as i64) + (coefficient.len() as i64 - 1);
+
+    let mut text = String::with_capacity(coefficient.len() + 8);
+    text.push_str(sign);
+    if scale >= 0 && adjusted >= -6 {
+        let scale = scale as usize;
+        if scale == 0 {
+            text.push_str(coefficient);
+        } else if coefficient.len() > scale {
+            let (int, frac) = coefficient.split_at(coefficient.len() - scale);
+            text.push_str(int);
+            text.push('.');
+            text.push_str(frac);
+        } else {
+            text.push_str("0.");
+            text.extend(std::iter::repeat_n('0', scale - coefficient.len()));
+            text.push_str(coefficient);
+        }
+    } else {
+        // the coefficient of an integer has at least one digit
+        let (first, rest) = coefficient.split_at(1);
+        text.push_str(first);
+        if !rest.is_empty() {
+            text.push('.');
+            text.push_str(rest);
+        }
+        text.push('E');
+        if adjusted >= 0 {
+            text.push('+');
+        }
+        text.push_str(&adjusted.to_string());
+    }
+    text
+}
+
+/// Builds a decimal encoder that writes values like Java's `BigDecimal.toString`.
+/// The scale is the one declared on the Arrow type, as Spark's `BigDecimal`
+/// carries the column's scale.
+fn spark_decimal_encoder<'a, T>(array: &'a PrimitiveArray<T>) -> NullableEncoder<'a>
+where
+    T: DecimalType,
+    T::Native: std::fmt::Display,
+{
+    let encoder = SparkDecimalEncoder {
+        values: array.values(),
+        scale: array.scale(),
+    };
+    NullableEncoder::new(Box::new(encoder), array.nulls().cloned())
+}
+
+struct SparkDecimalEncoder<'a, N> {
+    values: &'a [N],
+    scale: i8,
+}
+
+impl<N: std::fmt::Display + Copy> Encoder for SparkDecimalEncoder<'_, N> {
+    fn encode(&mut self, idx: usize, out: &mut Vec<u8>) {
+        let text = java_big_decimal_text(&self.values[idx].to_string(), self.scale);
+        out.extend_from_slice(text.as_bytes());
+    }
+}
+
 /// Builds a Base64 encoder for any of arrow's binary array types.
 fn base64_encoder<'a, B>(array: B) -> NullableEncoder<'a>
 where
@@ -619,8 +714,9 @@ mod tests {
         LargeBinaryArray, ListBuilder, MapBuilder, StringArray, StructArray,
         StructBuilder, TimestampMicrosecondArray, TimestampSecondArray,
     };
+    use arrow::array::{Decimal32Array, Decimal128Array, Decimal256Array};
     use arrow::buffer::NullBuffer;
-    use arrow::datatypes::{Field, Fields};
+    use arrow::datatypes::{Field, Fields, i256};
     use datafusion_common::cast::as_string_array;
     use datafusion_common::config::ConfigOptions;
 
@@ -1105,6 +1201,7 @@ mod tests {
             "unexpected error: {err}"
         );
     }
+
     /// 2024-01-01 01:02:03.123456 UTC, in microseconds since the epoch
     const TS_MICROS: i64 = 1_704_070_923_123_456;
 
@@ -1187,6 +1284,7 @@ mod tests {
             r#"{"plus5":"2024-01-01T01:02:03.123Z","secs":"2024-01-01T01:02:03.000Z","l":["2024-01-01T01:02:03.000Z"]}"#
         );
     }
+
     #[test]
     fn test_java_float_text() {
         // Java Double.toString: plain decimal for 1e-3 <= |x| < 1e7, else scientific
@@ -1267,6 +1365,98 @@ mod tests {
         assert_eq!(
             out.value(3),
             r#"{"d":1.5,"f":1.5,"l":[1.0E-5,1.0],"n":{"d":1.5}}"#
+        );
+    }
+
+    #[test]
+    fn test_java_big_decimal_text() {
+        // Java BigDecimal.toString: plain when scale >= 0 and adjusted >= -6,
+        // scientific (signed exponent) otherwise
+        let cases: [(&str, i8, &str); 13] = [
+            ("0", 10, "0E-10"),  // 0 as decimal(38,10)
+            ("10", 8, "1.0E-7"), // 0.0000001 as decimal(10,8)
+            ("150", 2, "1.50"),
+            ("123", 0, "123"),
+            ("1", 6, "0.000001"), // adjusted = -6: still plain
+            ("1", 7, "1E-7"),     // adjusted = -7: scientific, single digit
+            ("-5", 2, "-0.05"),
+            ("0", 2, "0.00"),
+            ("0", 0, "0"),
+            ("-123", 8, "-0.00000123"), // adjusted = -6: still plain
+            ("-123", 9, "-1.23E-7"),    // adjusted = -7: scientific
+            ("123", -2, "1.23E+4"),     // negative scale: exponent gets a '+'
+            (
+                "12345678901234567890123456789012345678",
+                10,
+                "1234567890123456789012345678.9012345678",
+            ),
+        ];
+        for (unscaled, scale, expected) in cases {
+            assert_eq!(
+                java_big_decimal_text(unscaled, scale),
+                expected,
+                "unscaled {unscaled} scale {scale}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_decimals_use_java_big_decimal_to_string() {
+        // d: Decimal128(38,10) [0, 1.5], e: Decimal128(10,8) [0.0000001, NULL],
+        // s: Decimal32(5,2) [1.50], w: Decimal256(50,3) [-0.005],
+        // l: List<Decimal128(10,8)> [[0.0000001]]
+        let d = Arc::new(
+            Decimal128Array::from(vec![Some(0), Some(15_000_000_000)])
+                .with_precision_and_scale(38, 10)
+                .unwrap(),
+        ) as ArrayRef;
+        let e = Arc::new(
+            Decimal128Array::from(vec![Some(10), None])
+                .with_precision_and_scale(10, 8)
+                .unwrap(),
+        ) as ArrayRef;
+        let s = Arc::new(
+            Decimal32Array::from(vec![Some(150), Some(150)])
+                .with_precision_and_scale(5, 2)
+                .unwrap(),
+        ) as ArrayRef;
+        let w = Arc::new(
+            Decimal256Array::from(vec![Some(i256::from(-5)), Some(i256::from(-5))])
+                .with_precision_and_scale(50, 3)
+                .unwrap(),
+        ) as ArrayRef;
+        let mut l = ListBuilder::new(
+            Decimal128Array::builder(1)
+                .with_precision_and_scale(10, 8)
+                .unwrap(),
+        );
+        for _ in 0..2 {
+            l.values().append_value(10);
+            l.append(true);
+        }
+        let l = Arc::new(l.finish()) as ArrayRef;
+
+        let fields = Fields::from(vec![
+            Field::new("d", d.data_type().clone(), true),
+            Field::new("e", e.data_type().clone(), true),
+            Field::new("s", s.data_type().clone(), true),
+            Field::new("w", w.data_type().clone(), true),
+            Field::new("l", l.data_type().clone(), true),
+        ]);
+        let input = StructArray::new(fields, vec![d, e, s, w, l], None);
+        let field = field_of(&input);
+
+        let out = run(ColumnarValue::Array(Arc::new(input)), field).unwrap();
+        let out = as_string_array(&out).unwrap();
+
+        assert_eq!(
+            out.value(0),
+            r#"{"d":0E-10,"e":1.0E-7,"s":1.50,"w":-0.005,"l":[1.0E-7]}"#
+        );
+        // 1.5 keeps the declared scale; a NULL decimal is omitted
+        assert_eq!(
+            out.value(1),
+            r#"{"d":1.5000000000,"s":1.50,"w":-0.005,"l":[1.0E-7]}"#
         );
     }
 }
@@ -1731,6 +1921,33 @@ mod dataframe_tests {
             (
                 "named_struct('m', map(make_array('k'), make_array(1e10)))",
                 r#"{"m":{"k":1.0E10}}"#,
+            ),
+        ])
+        .await
+    }
+
+    #[tokio::test]
+    async fn to_json_decimals_use_java_big_decimal_sql() -> Result<()> {
+        assert_sql_json(&[
+            ("named_struct('d', CAST(0 AS DECIMAL(38, 10)))", r#"{"d":0E-10}"#),
+            (
+                "named_struct('d', CAST(0.0000001 AS DECIMAL(10, 8)))",
+                r#"{"d":1.0E-7}"#,
+            ),
+            ("named_struct('d', CAST(1.5 AS DECIMAL(10, 2)))", r#"{"d":1.50}"#),
+            ("named_struct('d', CAST(123 AS DECIMAL(10, 0)))", r#"{"d":123}"#),
+            (
+                "named_struct('d', CAST(-0.05 AS DECIMAL(10, 2)))",
+                r#"{"d":-0.05}"#,
+            ),
+            // nested in a list and a map value
+            (
+                "named_struct('l', make_array(CAST(0 AS DECIMAL(38, 10))))",
+                r#"{"l":[0E-10]}"#,
+            ),
+            (
+                "named_struct('m', map(make_array('k'), make_array(CAST(1.5 AS DECIMAL(10, 2)))))",
+                r#"{"m":{"k":1.50}}"#,
             ),
         ])
         .await
