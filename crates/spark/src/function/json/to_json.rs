@@ -55,6 +55,8 @@ use datafusion_functions::core::expr_fn::named_struct;
 ///   (`{"19723":1}`), timestamps as microseconds since the epoch, floats and
 ///   decimals like Java's `Double.toString` / `BigDecimal.toString`
 ///   (`{"1.0E10":1}`)
+/// - Strings are escaped like Jackson does: `\"`, `\\`, `\b \t \n \f \r`, and
+///   `\u00XX` with uppercase hex for the other control characters
 /// - Binary values are Base64 strings
 /// - Floats are written like Java's `Double.toString` / `Float.toString`:
 ///   plain decimal with at least one fraction digit for `1e-3 <= |x| < 1e7`
@@ -287,6 +289,10 @@ impl EncoderFactory for SparkJsonEncoderFactory {
                     array.nulls().cloned(),
                 )))
             }
+            // Jackson writes control characters as \u001F, serde_json as \u001f
+            DataType::Utf8 => Ok(Some(string_encoder(array.as_string::<i32>()))),
+            DataType::LargeUtf8 => Ok(Some(string_encoder(array.as_string::<i64>()))),
+            DataType::Utf8View => Ok(Some(string_encoder(array.as_string_view()))),
             // Spark serializes binary values as Base64 strings, arrow-json as hex
             DataType::Binary => Ok(Some(base64_encoder(array.as_binary::<i32>()))),
             DataType::LargeBinary => Ok(Some(base64_encoder(array.as_binary::<i64>()))),
@@ -637,6 +643,63 @@ impl<N: std::fmt::Display + Copy> Encoder for SparkDecimalEncoder<'_, N> {
     }
 }
 
+/// Builds a string encoder for any of arrow's string array types.
+fn string_encoder<'a, S>(array: S) -> NullableEncoder<'a>
+where
+    S: ArrayAccessor<Item = &'a str> + Array + 'a,
+{
+    let nulls = array.nulls().cloned();
+    NullableEncoder::new(Box::new(SparkStringEncoder(array)), nulls)
+}
+
+struct SparkStringEncoder<S>(S);
+
+impl<'a, S: ArrayAccessor<Item = &'a str>> Encoder for SparkStringEncoder<S> {
+    fn encode(&mut self, idx: usize, out: &mut Vec<u8>) {
+        write_json_string(self.0.value(idx), out);
+    }
+}
+
+const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
+
+/// Writes `s` as a JSON string the way Jackson (and so Spark) does: `"`, `\`
+/// and the control characters are escaped, with the short forms for
+/// `\b \t \n \f \r` and uppercase `\u00XX` for the rest.
+fn write_json_string(s: &str, out: &mut Vec<u8>) {
+    out.push(b'"');
+    let bytes = s.as_bytes();
+    let mut start = 0;
+    // only ASCII is matched: every byte of a multi-byte character is >= 0x80
+    for (i, &byte) in bytes.iter().enumerate() {
+        let short = match byte {
+            b'"' => Some(b'"'),
+            b'\\' => Some(b'\\'),
+            0x08 => Some(b'b'),
+            b'\t' => Some(b't'),
+            b'\n' => Some(b'n'),
+            0x0C => Some(b'f'),
+            b'\r' => Some(b'r'),
+            0x00..=0x1F => None,
+            _ => continue,
+        };
+        out.extend_from_slice(&bytes[start..i]);
+        match short {
+            Some(c) => out.extend_from_slice(&[b'\\', c]),
+            None => out.extend_from_slice(&[
+                b'\\',
+                b'u',
+                b'0',
+                b'0',
+                HEX_UPPER[usize::from(byte >> 4)],
+                HEX_UPPER[usize::from(byte & 0xF)],
+            ]),
+        }
+        start = i + 1;
+    }
+    out.extend_from_slice(&bytes[start..]);
+    out.push(b'"');
+}
+
 /// Builds a Base64 encoder for any of arrow's binary array types.
 fn base64_encoder<'a, B>(array: B) -> NullableEncoder<'a>
 where
@@ -860,9 +923,7 @@ fn micros_key_texts<T: ArrowTimestampType>(
 
 impl Encoder for MapKeyEncoder {
     fn encode(&mut self, idx: usize, out: &mut Vec<u8>) {
-        // serde_json handles the quoting and escaping; writing to a Vec is
-        // infallible
-        serde_json::to_writer(&mut *out, self.0.value(idx)).unwrap();
+        write_json_string(self.0.value(idx), out);
     }
 }
 
@@ -931,9 +992,10 @@ mod tests {
         BinaryArray, BinaryBuilder, BinaryViewArray, BooleanArray, Date32Array,
         Date64Array, Decimal32Array, Decimal128Array, Decimal256Array, DictionaryArray,
         FixedSizeBinaryArray, Float32Array, Float64Array, Float64Builder, Int32Array,
-        Int32Builder, Int64Array, LargeBinaryArray, ListArray, ListBuilder, MapBuilder,
-        StringArray, StructArray, TimestampMicrosecondArray, TimestampNanosecondArray,
-        TimestampSecondArray, UInt8Array,
+        Int32Builder, Int64Array, LargeBinaryArray, LargeStringArray, ListArray,
+        ListBuilder, MapBuilder, StringArray, StringViewArray, StructArray,
+        TimestampMicrosecondArray, TimestampNanosecondArray, TimestampSecondArray,
+        UInt8Array,
     };
     use arrow::buffer::NullBuffer;
     use arrow::datatypes::{
@@ -1523,6 +1585,56 @@ mod tests {
         );
         // NULL is still a NULL struct field -> omitted
         assert_eq!(out.value(4), r#"{"l":["NaN",1.5],"n":{}}"#);
+    }
+
+    #[test]
+    fn test_write_json_string() {
+        let json = |s: &str| {
+            let mut out = Vec::new();
+            write_json_string(s, &mut out);
+            String::from_utf8(out).unwrap()
+        };
+        assert_eq!(json(""), "\"\"");
+        assert_eq!(json("plain text"), r#""plain text""#);
+        assert_eq!(json(r#"q"b\"#), r#""q\"b\\""#);
+        assert_eq!(json("\u{8}\t\n\u{c}\r"), r#""\b\t\n\f\r""#);
+        // other control characters use uppercase hex, as Jackson does
+        assert_eq!(json("a\u{1f}b"), r#""a\u001Fb""#);
+        assert_eq!(json("\u{0}\u{1}\u{1b}"), r#""\u0000\u0001\u001B""#);
+        // `/`, DEL and non-ASCII are written as is
+        assert_eq!(json("a/b\u{7f}é🦀"), "\"a/b\u{7f}é🦀\"");
+    }
+
+    #[test]
+    fn test_strings_are_escaped_like_jackson() {
+        let text = "a\u{1f}\"b";
+        let s = Arc::new(StringArray::from(vec![Some(text), None])) as ArrayRef;
+        let l = Arc::new(LargeStringArray::from(vec![Some(text), None])) as ArrayRef;
+        let v = Arc::new(StringViewArray::from(vec![Some(text), None])) as ArrayRef;
+
+        let mut m = MapBuilder::new(None, StringBuilder::new(), StringBuilder::new());
+        m.keys().append_value(text);
+        m.values().append_value(text);
+        m.append(true).unwrap();
+        m.append(true).unwrap();
+        let m = Arc::new(m.finish()) as ArrayRef;
+
+        let fields = Fields::from(vec![
+            Field::new("s", DataType::Utf8, true),
+            Field::new("l", DataType::LargeUtf8, true),
+            Field::new("v", DataType::Utf8View, true),
+            Field::new("m", m.data_type().clone(), true),
+        ]);
+        let input = StructArray::new(fields, vec![s, l, v, m], None);
+        let field = field_of(&input);
+
+        let out = run(ColumnarValue::Array(Arc::new(input)), field).unwrap();
+        let out = as_string_array(&out).unwrap();
+        assert_eq!(
+            out.value(0),
+            r#"{"s":"a\u001F\"b","l":"a\u001F\"b","v":"a\u001F\"b","m":{"a\u001F\"b":"a\u001F\"b"}}"#
+        );
+        assert_eq!(out.value(1), r#"{"m":{}}"#);
     }
 
     #[test]
@@ -2497,6 +2609,29 @@ mod dataframe_tests {
             (
                 "named_struct('m', map(make_array('k'), make_array(1e10)))",
                 r#"{"m":{"k":1.0E10}}"#,
+            ),
+        ])
+        .await
+    }
+
+    #[tokio::test]
+    async fn to_json_escapes_strings_like_jackson_sql() -> Result<()> {
+        assert_sql_json(&[
+            (
+                "named_struct('s', 'a' || chr(31) || 'b')",
+                r#"{"s":"a\u001Fb"}"#,
+            ),
+            (
+                "named_struct('s', 'q\"' || chr(10) || 'é')",
+                r#"{"s":"q\"\né"}"#,
+            ),
+            (
+                "named_struct('m', map(make_array(chr(31)), make_array(chr(1))))",
+                r#"{"m":{"\u001F":"\u0001"}}"#,
+            ),
+            (
+                "named_struct('l', make_array(chr(27), 'x'))",
+                r#"{"l":["\u001B","x"]}"#,
             ),
         ])
         .await
