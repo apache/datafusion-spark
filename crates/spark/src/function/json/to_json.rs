@@ -13,16 +13,19 @@ use arrow::array::{
 use arrow::buffer::OffsetBuffer;
 use arrow::compute::cast;
 use arrow::datatypes::{
-    ArrowPrimitiveType, ArrowTimestampType, DataType, Decimal32Type, Decimal64Type,
-    Decimal128Type, Decimal256Type, DecimalType, FieldRef, Float32Type, Float64Type,
-    TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
-    TimestampNanosecondType, TimestampSecondType,
+    ArrowPrimitiveType, ArrowTimestampType, DataType, Date32Type, Date64Type,
+    Decimal32Type, Decimal64Type, Decimal128Type, Decimal256Type, DecimalType, FieldRef,
+    Float32Type, Float64Type, TimeUnit, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
 };
 use arrow::error::ArrowError;
 use arrow::json::writer::{
     Encoder, EncoderFactory, EncoderOptions, NullableEncoder, make_encoder,
 };
-use arrow::temporal_conversions::{as_datetime, as_datetime_with_timezone};
+use arrow::temporal_conversions::{
+    MICROSECONDS, MILLISECONDS, MILLISECONDS_IN_DAY, NANOSECONDS, as_datetime,
+    as_datetime_with_timezone,
+};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use datafusion_common::config::ConfigOptions;
@@ -47,7 +50,11 @@ use datafusion_functions::core::expr_fn::named_struct;
 /// - A NULL struct row produces NULL
 /// - NULL struct fields are omitted from the object (`ignoreNullFields = true`);
 ///   NULL map entries are kept as `"key":null`
-/// - Map keys are written as strings whatever their type (`{"1":"v"}`)
+/// - Map keys are written as strings holding the text of Spark's internal
+///   value: `{"1":"v"}`, `{"true":"v"}`, dates as days since the epoch
+///   (`{"19723":1}`), timestamps as microseconds since the epoch, floats and
+///   decimals like Java's `Double.toString` / `BigDecimal.toString`
+///   (`{"1.0E10":1}`)
 /// - Binary values are Base64 strings
 /// - Floats are written like Java's `Double.toString` / `Float.toString`:
 ///   plain decimal with at least one fraction digit for `1e-3 <= |x| < 1e7`
@@ -360,21 +367,22 @@ impl Encoder for QuotedTextEncoder {
 
 /// Floating point types that Spark serializes like Java's `Double.toString`.
 trait SparkFloat: Copy + LowerExp {
-    /// The JSON text Spark emits for a non-finite value, or `None` if finite.
-    fn non_finite_json(self) -> Option<&'static [u8]>;
+    /// Java's text for a non-finite value (`NaN`, `Infinity`, `-Infinity`),
+    /// or `None` if finite.
+    fn non_finite_text(self) -> Option<&'static str>;
 }
 
 macro_rules! spark_float {
     ($($t:ty),*) => {$(
         impl SparkFloat for $t {
-            fn non_finite_json(self) -> Option<&'static [u8]> {
+            fn non_finite_text(self) -> Option<&'static str> {
                 if self.is_nan() {
-                    Some(b"\"NaN\"")
+                    Some("NaN")
                 } else if self.is_infinite() {
                     Some(if self.is_sign_positive() {
-                        b"\"Infinity\""
+                        "Infinity"
                     } else {
-                        b"\"-Infinity\""
+                        "-Infinity"
                     })
                 } else {
                     None
@@ -463,8 +471,13 @@ struct SparkFloatEncoder<'a, N: SparkFloat> {
 impl<N: SparkFloat> Encoder for SparkFloatEncoder<'_, N> {
     fn encode(&mut self, idx: usize, out: &mut Vec<u8>) {
         let value = self.values[idx];
-        match value.non_finite_json() {
-            Some(text) => out.extend_from_slice(text),
+        match value.non_finite_text() {
+            // Spark writes non-finite values as JSON strings
+            Some(text) => {
+                out.push(b'"');
+                out.extend_from_slice(text.as_bytes());
+                out.push(b'"');
+            }
             None => out.extend_from_slice(java_float_text(value).as_bytes()),
         }
     }
@@ -615,28 +628,126 @@ impl<'a> SparkMapEncoder<'a> {
     }
 }
 
-/// Encodes map keys as JSON strings.
-///
-/// Spark writes every map key as its string form (`{"1":"v"}`,
-/// `{"true":"v"}`), so non-string keys are cast to `Utf8` first. Key types
-/// without a string cast (lists, structs, ...) are rejected.
+/// Encodes map keys as JSON strings holding the text that Spark gives them,
+/// see `spark_map_key_texts`.
 struct MapKeyEncoder(StringArray);
 
 impl MapKeyEncoder {
     fn try_new(keys: &ArrayRef) -> Result<Self, ArrowError> {
-        let strings = cast(keys, &DataType::Utf8).map_err(|e| {
-            ArrowError::JsonError(format!(
-                "to_json: unsupported map key type {}: {e}",
-                keys.data_type()
-            ))
-        })?;
-        if strings.null_count() > 0 {
+        if keys.null_count() > 0 {
             return Err(ArrowError::InvalidArgumentError(
                 "to_json: encountered a NULL map key".to_string(),
             ));
         }
-        Ok(Self(strings.as_string::<i32>().clone()))
+        Ok(Self(spark_map_key_texts(keys)?))
     }
+}
+
+/// Stringifies map keys the way Spark does, with the `toString` of its
+/// internal value: dates are days since the epoch, timestamps microseconds
+/// since the epoch, floats and decimals follow Java's `Double.toString` and
+/// `BigDecimal.toString`. Key types whose internal value has no meaningful
+/// text (binary, lists, structs, maps, ...) are rejected.
+fn spark_map_key_texts(keys: &ArrayRef) -> Result<StringArray, ArrowError> {
+    use DataType::*;
+    Ok(match keys.data_type() {
+        // arrow's cast already produces Java's text for these
+        Utf8 | LargeUtf8 | Utf8View | Boolean | Int8 | Int16 | Int32 | Int64 | UInt8
+        | UInt16 | UInt32 | UInt64 => cast(keys, &Utf8)?.as_string::<i32>().clone(),
+        Float32 => key_texts(keys.as_primitive::<Float32Type>(), java_float_key_text),
+        Float64 => key_texts(keys.as_primitive::<Float64Type>(), java_float_key_text),
+        // Spark's DateType holds the number of days since the epoch
+        Date32 => key_texts(keys.as_primitive::<Date32Type>(), |days| days.to_string()),
+        Date64 => key_texts(keys.as_primitive::<Date64Type>(), |ms| {
+            ms.div_euclid(MILLISECONDS_IN_DAY).to_string()
+        }),
+        Timestamp(unit, _) => timestamp_key_texts(keys, *unit)?,
+        Decimal32(_, scale) => decimal_key_texts::<Decimal32Type>(keys, *scale),
+        Decimal64(_, scale) => decimal_key_texts::<Decimal64Type>(keys, *scale),
+        Decimal128(_, scale) => decimal_key_texts::<Decimal128Type>(keys, *scale),
+        Decimal256(_, scale) => decimal_key_texts::<Decimal256Type>(keys, *scale),
+        other => {
+            return Err(ArrowError::JsonError(format!(
+                "to_json: unsupported map key type {other}"
+            )));
+        }
+    })
+}
+
+/// Formats each key with `f` (NULL keys have been rejected already).
+fn key_texts<T: ArrowPrimitiveType>(
+    keys: &PrimitiveArray<T>,
+    f: impl Fn(T::Native) -> String,
+) -> StringArray {
+    keys.iter().map(|key| key.map(&f)).collect()
+}
+
+/// Java's `Double.toString` for a map key: finite values as `java_float_text`,
+/// non-finite ones as the bare words `NaN`, `Infinity` and `-Infinity`.
+fn java_float_key_text<F: SparkFloat>(value: F) -> String {
+    match value.non_finite_text() {
+        Some(text) => text.to_string(),
+        None => java_float_text(value),
+    }
+}
+
+fn decimal_key_texts<T>(keys: &ArrayRef, scale: i8) -> StringArray
+where
+    T: DecimalType,
+    T::Native: std::fmt::Display,
+{
+    key_texts(keys.as_primitive::<T>(), |unscaled| {
+        java_big_decimal_text(&unscaled.to_string(), scale)
+    })
+}
+
+/// Spark's TimestampType holds microseconds since the epoch, so timestamp
+/// keys are written as such whatever their Arrow unit (and time zone).
+fn timestamp_key_texts(
+    keys: &ArrayRef,
+    unit: TimeUnit,
+) -> Result<StringArray, ArrowError> {
+    match unit {
+        TimeUnit::Second => {
+            micros_key_texts(keys.as_primitive::<TimestampSecondType>(), |s| {
+                s.checked_mul(MICROSECONDS)
+            })
+        }
+        TimeUnit::Millisecond => {
+            micros_key_texts(keys.as_primitive::<TimestampMillisecondType>(), |ms| {
+                ms.checked_mul(MILLISECONDS)
+            })
+        }
+        TimeUnit::Microsecond => {
+            micros_key_texts(keys.as_primitive::<TimestampMicrosecondType>(), Some)
+        }
+        TimeUnit::Nanosecond => {
+            micros_key_texts(keys.as_primitive::<TimestampNanosecondType>(), |ns| {
+                Some(ns.div_euclid(NANOSECONDS / MICROSECONDS))
+            })
+        }
+    }
+}
+
+/// Formats each key as the microseconds `to_micros` converts it to; a value
+/// that does not fit is an error rather than a wrapped number.
+fn micros_key_texts<T: ArrowTimestampType>(
+    keys: &PrimitiveArray<T>,
+    to_micros: impl Fn(i64) -> Option<i64>,
+) -> Result<StringArray, ArrowError> {
+    keys.iter()
+        .map(|key| {
+            key.map(|value| {
+                to_micros(value).map(|us| us.to_string()).ok_or_else(|| {
+                    ArrowError::JsonError(format!(
+                        "to_json: timestamp map key {value} ({:?}) is out of range",
+                        T::UNIT
+                    ))
+                })
+            })
+            .transpose()
+        })
+        .collect()
 }
 
 impl Encoder for MapKeyEncoder {
@@ -709,14 +820,15 @@ mod tests {
     use super::*;
 
     use arrow::array::{
-        BinaryArray, BinaryBuilder, BinaryViewArray, BooleanArray, FixedSizeBinaryArray,
-        Float32Array, Float64Array, Float64Builder, Int32Array, Int32Builder, Int64Array,
-        LargeBinaryArray, ListBuilder, MapBuilder, StringArray, StructArray,
-        StructBuilder, TimestampMicrosecondArray, TimestampSecondArray,
+        BinaryArray, BinaryBuilder, BinaryViewArray, BooleanArray, Date32Array,
+        Date64Array, Decimal32Array, Decimal128Array, Decimal256Array,
+        FixedSizeBinaryArray, Float32Array, Float64Array, Float64Builder, Int32Array,
+        Int32Builder, Int64Array, LargeBinaryArray, ListArray, ListBuilder, MapBuilder,
+        StringArray, StructArray, TimestampMicrosecondArray, TimestampNanosecondArray,
+        TimestampSecondArray, UInt8Array,
     };
-    use arrow::array::{Decimal32Array, Decimal128Array, Decimal256Array};
     use arrow::buffer::NullBuffer;
-    use arrow::datatypes::{Field, Fields, i256};
+    use arrow::datatypes::{Field, Fields, Int32Type, i256};
     use datafusion_common::cast::as_string_array;
     use datafusion_common::config::ConfigOptions;
 
@@ -1174,32 +1286,147 @@ mod tests {
         assert_eq!(out.value(0), r#"{"i":{"1":"a","2":"b"},"f":{"1.5":"c"}}"#);
     }
 
-    #[test]
-    fn test_map_with_unsupported_key_type_errors() {
-        // Map<Struct<a: Int32>, Utf8>: structs have no string cast
-        // (lists do: a List<Int32> key becomes the string "[1]")
-        let key_fields = Fields::from(vec![Field::new("a", DataType::Int32, true)]);
-        let key_builder = StructBuilder::from_fields(key_fields, 1);
-        let mut m = MapBuilder::new(None, key_builder, StringBuilder::new());
-        m.keys()
-            .field_builder::<Int32Builder>(0)
-            .unwrap()
-            .append_value(1);
-        m.keys().append(true);
-        m.values().append_value("v");
-        m.append(true).unwrap();
-        let m = Arc::new(m.finish()) as ArrayRef;
+    /// Serializes the one-row struct `{"m": map}` whose map pairs `keys` with
+    /// the values 1, 2, ...
+    fn map_with_keys_json(keys: ArrayRef) -> Result<String> {
+        let n = keys.len();
+        let values = Arc::new(Int32Array::from_iter_values(1..=n as i32)) as ArrayRef;
+        let entry_fields = Fields::from(vec![
+            Field::new("keys", keys.data_type().clone(), false),
+            Field::new("values", DataType::Int32, true),
+        ]);
+        let entries = StructArray::new(entry_fields.clone(), vec![keys, values], None);
+        let map = MapArray::new(
+            Arc::new(Field::new("entries", DataType::Struct(entry_fields), false)),
+            OffsetBuffer::new(vec![0, n as i32].into()),
+            entries,
+            None,
+            false,
+        );
+        let m = Arc::new(map) as ArrayRef;
 
         let fields = Fields::from(vec![Field::new("m", m.data_type().clone(), true)]);
         let input = StructArray::new(fields, vec![m], None);
         let field = field_of(&input);
 
-        let err = run(ColumnarValue::Array(Arc::new(input)), field).unwrap_err();
+        let out = run(ColumnarValue::Array(Arc::new(input)), field)?;
+        Ok(as_string_array(&out)?.value(0).to_string())
+    }
+
+    #[test]
+    fn test_map_keys_use_spark_internal_values() {
+        let json = |keys: ArrayRef| map_with_keys_json(keys).unwrap();
+
+        // integers of any width keep their text
+        assert_eq!(
+            json(Arc::new(Int64Array::from(vec![-7, 42]))),
+            r#"{"m":{"-7":1,"42":2}}"#
+        );
+        assert_eq!(
+            json(Arc::new(UInt8Array::from(vec![255]))),
+            r#"{"m":{"255":1}}"#
+        );
+
+        // floats like Java's Double.toString, non-finite as bare words
+        assert_eq!(
+            json(Arc::new(Float64Array::from(vec![
+                1e10,
+                1.5,
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ]))),
+            r#"{"m":{"1.0E10":1,"1.5":2,"NaN":3,"Infinity":4,"-Infinity":5}}"#
+        );
+        assert_eq!(
+            json(Arc::new(Float32Array::from(vec![1e10f32, 0.001]))),
+            r#"{"m":{"1.0E10":1,"0.001":2}}"#
+        );
+
+        // dates are days since the epoch (2024-01-01 is day 19723)
+        assert_eq!(
+            json(Arc::new(Date32Array::from(vec![19723, -1]))),
+            r#"{"m":{"19723":1,"-1":2}}"#
+        );
+        assert_eq!(
+            json(Arc::new(Date64Array::from(vec![
+                19723 * MILLISECONDS_IN_DAY + 1,
+                -1,
+            ]))),
+            r#"{"m":{"19723":1,"-1":2}}"#
+        );
+
+        // timestamps are microseconds since the epoch, whatever the Arrow
+        // unit; the time zone does not change the instant
+        assert_eq!(
+            json(Arc::new(
+                TimestampMicrosecondArray::from(vec![TS_MICROS]).with_timezone("+02:00")
+            )),
+            r#"{"m":{"1704070923123456":1}}"#
+        );
+        assert_eq!(
+            json(Arc::new(TimestampSecondArray::from(vec![
+                TS_MICROS / 1_000_000
+            ]))),
+            r#"{"m":{"1704070923000000":1}}"#
+        );
+        assert_eq!(
+            json(Arc::new(TimestampNanosecondArray::from(vec![
+                TS_MICROS * 1_000 + 789,
+            ]))),
+            r#"{"m":{"1704070923123456":1}}"#
+        );
+
+        // decimals like Java's BigDecimal.toString
+        assert_eq!(
+            json(Arc::new(
+                Decimal128Array::from(vec![10, 150_000_000])
+                    .with_precision_and_scale(10, 8)
+                    .unwrap()
+            )),
+            r#"{"m":{"1.0E-7":1,"1.50000000":2}}"#
+        );
+        assert_eq!(
+            json(Arc::new(
+                Decimal32Array::from(vec![150])
+                    .with_precision_and_scale(5, 2)
+                    .unwrap()
+            )),
+            r#"{"m":{"1.50":1}}"#
+        );
+    }
+
+    #[test]
+    fn test_timestamp_map_key_out_of_range_errors() {
+        let keys = Arc::new(TimestampSecondArray::from(vec![i64::MAX])) as ArrayRef;
+        let err = map_with_keys_json(keys).unwrap_err();
         assert!(
-            err.to_string()
-                .contains("to_json: unsupported map key type"),
+            err.to_string().contains("timestamp map key")
+                && err.to_string().contains("is out of range"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_map_with_unsupported_key_type_errors() {
+        // Spark would print an object dump for these, so there is no faithful text
+        let list_keys = Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+            Some(vec![Some(1)]),
+        ])) as ArrayRef;
+        let binary_keys = Arc::new(BinaryArray::from(vec![b"k".as_ref()])) as ArrayRef;
+        let struct_keys = Arc::new(StructArray::from(vec![(
+            Arc::new(Field::new("a", DataType::Int32, true)),
+            Arc::new(Int32Array::from(vec![1])) as ArrayRef,
+        )])) as ArrayRef;
+
+        for keys in [list_keys, binary_keys, struct_keys] {
+            let err = map_with_keys_json(keys).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("to_json: unsupported map key type"),
+                "unexpected error: {err}"
+            );
+        }
     }
 
     /// 2024-01-01 01:02:03.123456 UTC, in microseconds since the epoch
@@ -1844,6 +2071,28 @@ mod dataframe_tests {
             (
                 "named_struct('m', map(make_array('k'), make_array('v')))",
                 r#"{"m":{"k":"v"}}"#,
+            ),
+            // Spark's internal values: days, microseconds, Java's Double.toString
+            // and BigDecimal.toString
+            (
+                "named_struct('m', map(make_array(DATE '2024-01-01'), make_array(1)))",
+                r#"{"m":{"19723":1}}"#,
+            ),
+            (
+                "named_struct('m', map(make_array(TIMESTAMP '2024-01-01 01:02:03.123456'), make_array(1)))",
+                r#"{"m":{"1704070923123456":1}}"#,
+            ),
+            (
+                "named_struct('m', map(make_array(1e10), make_array(1)))",
+                r#"{"m":{"1.0E10":1}}"#,
+            ),
+            (
+                "named_struct('m', map(make_array(CAST('NaN' AS DOUBLE)), make_array(1)))",
+                r#"{"m":{"NaN":1}}"#,
+            ),
+            (
+                "named_struct('m', map(make_array(CAST(0.0000001 AS DECIMAL(10, 8))), make_array(1)))",
+                r#"{"m":{"1.0E-7":1}}"#,
             ),
             // recursively: an int-keyed map inside a list, a struct and a map value
             (
