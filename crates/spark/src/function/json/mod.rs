@@ -3,12 +3,14 @@
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
 pub mod json_tuple;
+pub mod to_json;
 
 use datafusion_expr::ScalarUDF;
 use datafusion_functions::make_udf_function;
 use std::sync::Arc;
 
 make_udf_function!(json_tuple::JsonTuple, json_tuple);
+make_udf_function!(to_json::SparkToJson, to_json);
 
 pub mod expr_fn {
     use datafusion_functions::export_functions;
@@ -18,8 +20,13 @@ pub mod expr_fn {
         "Extracts top-level fields from a JSON string and returns them as a struct.",
         args,
     ));
+    export_functions!((
+        to_json,
+        "Serializes a struct value to a JSON string, following Spark's `to_json`; NULL fields are omitted and a NULL struct produces NULL.",
+        input
+    ));
 }
 
 pub fn functions() -> Vec<Arc<ScalarUDF>> {
-    vec![json_tuple()]
+    vec![json_tuple(), to_json()]
 }
