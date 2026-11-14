@@ -6,6 +6,7 @@ pub mod abs;
 pub mod atan2;
 pub mod bin;
 pub mod ceil;
+pub mod divide;
 pub mod expm1;
 pub mod factorial;
 pub mod floor;
@@ -43,6 +44,7 @@ make_udf_function!(trigonometry::SparkCsc, csc);
 make_udf_function!(trigonometry::SparkSec, sec);
 make_udf_function!(negative::SparkNegative, negative);
 make_udf_function!(bin::SparkBin, bin);
+make_udf_function!(divide::SparkDivide, spark_divide);
 
 pub mod expr_fn {
     use datafusion_functions::export_functions;
@@ -113,5 +115,6 @@ pub fn functions() -> Vec<Arc<ScalarUDF>> {
         sec(),
         negative(),
         bin(),
+        spark_divide(),
     ]
 }
