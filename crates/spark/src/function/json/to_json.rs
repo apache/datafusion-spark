@@ -4,6 +4,7 @@
 
 use std::sync::{Arc, LazyLock};
 
+use arrow::array::timezone::Tz;
 use arrow::array::{
     Array, ArrayAccessor, ArrayRef, AsArray, MapArray, PrimitiveArray, StringArray,
     StringBuilder,
@@ -11,14 +12,18 @@ use arrow::array::{
 use arrow::buffer::OffsetBuffer;
 use arrow::compute::cast;
 use arrow::datatypes::{
-    ArrowPrimitiveType, DataType, FieldRef, Float32Type, Float64Type,
+    ArrowPrimitiveType, ArrowTimestampType, DataType, FieldRef, Float32Type, Float64Type,
+    TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+    TimestampNanosecondType, TimestampSecondType,
 };
 use arrow::error::ArrowError;
 use arrow::json::writer::{
     Encoder, EncoderFactory, EncoderOptions, NullableEncoder, make_encoder,
 };
+use arrow::temporal_conversions::{as_datetime, as_datetime_with_timezone};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use datafusion_common::config::ConfigOptions;
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Column, Result, ScalarValue, exec_datafusion_err, plan_err};
 use datafusion_expr::{
@@ -43,6 +48,12 @@ use datafusion_functions::core::expr_fn::named_struct;
 /// - Map keys are written as strings whatever their type (`{"1":"v"}`)
 /// - Binary values are Base64 strings
 /// - Non-finite floats are the strings `"NaN"`, `"Infinity"` and `"-Infinity"`
+/// - Timestamps are written as `yyyy-MM-dd'T'HH:mm:ss.SSS` (milliseconds,
+///   truncated). A timestamp with a time zone is an instant and is written in
+///   the session time zone (`datafusion.execution.time_zone`, UTC by default)
+///   with its offset, `Z` for UTC; the time zone recorded on the Arrow type is
+///   not used, as in Spark. A timestamp without a time zone (`TIMESTAMP_NTZ`)
+///   is written as is, without an offset.
 /// - Nested structs, lists and maps are serialized recursively
 ///
 /// The serialization is done batch by batch with the arrow-json row encoder:
@@ -93,18 +104,23 @@ impl ScalarUDFImpl for SparkToJson {
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         let ScalarFunctionArgs {
-            args, arg_fields, ..
+            args,
+            arg_fields,
+            config_options,
+            ..
         } = args;
         let [input] = take_function_args(self.name(), args)?;
         let [field] = take_function_args(self.name(), arg_fields)?;
 
         match input {
-            ColumnarValue::Array(array) => {
-                Ok(ColumnarValue::Array(struct_to_json(&field, &array)?))
-            }
+            ColumnarValue::Array(array) => Ok(ColumnarValue::Array(struct_to_json(
+                &field,
+                &array,
+                &config_options,
+            )?)),
             ColumnarValue::Scalar(scalar) => {
                 let array = scalar.to_array()?;
-                let result = struct_to_json(&field, &array)?;
+                let result = struct_to_json(&field, &array, &config_options)?;
                 Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(
                     &result, 0,
                 )?))
@@ -114,8 +130,12 @@ impl ScalarUDFImpl for SparkToJson {
 }
 
 /// Serializes a struct array with Spark's output rules.
-fn struct_to_json(field: &FieldRef, array: &ArrayRef) -> Result<ArrayRef> {
-    encode_struct_rows(field, array, &spark_encoder_options())
+fn struct_to_json(
+    field: &FieldRef,
+    array: &ArrayRef,
+    config: &ConfigOptions,
+) -> Result<ArrayRef> {
+    encode_struct_rows(field, array, &spark_encoder_options(config)?)
 }
 
 /// arrow-json options that reproduce Spark's `to_json` output.
@@ -124,14 +144,23 @@ fn struct_to_json(field: &FieldRef, array: &ArrayRef) -> Result<ArrayRef> {
 /// else (`encode_struct_rows`, `IntoJsonStruct`, the UDF plumbing) is
 /// independent of the output flavor and can be shared with other `to_json`
 /// variants, e.g. a Postgres-style one with explicit nulls.
-fn spark_encoder_options() -> EncoderOptions {
-    EncoderOptions::default()
+fn spark_encoder_options(config: &ConfigOptions) -> Result<EncoderOptions> {
+    // Spark writes TIMESTAMP values in the session time zone
+    let session_tz: Tz = config
+        .execution
+        .time_zone
+        .as_ref()
+        .map(|tz| tz.as_str())
+        .unwrap_or("+00:00")
+        .parse()?;
+
+    Ok(EncoderOptions::default()
         // Spark default: ignoreNullFields = true -> NULL struct fields are omitted
         .with_explicit_nulls(false)
         // where Spark's output differs from arrow's defaults: NULL map entries
         // are kept, map keys are strings, binary is Base64, non-finite floats
-        // are strings (see `SparkJsonEncoderFactory`)
-        .with_encoder_factory(Arc::new(SparkJsonEncoderFactory))
+        // are strings, timestamps use Spark's format (see `SparkJsonEncoderFactory`)
+        .with_encoder_factory(Arc::new(SparkJsonEncoderFactory { session_tz })))
 }
 
 /// Encodes every row of a struct array as a JSON object string using the
@@ -168,8 +197,12 @@ fn encode_struct_rows(
 /// differs from arrow's. `make_encoder` consults the factory for every array at
 /// every nesting level, so the overrides also apply inside lists, structs and
 /// maps.
-#[derive(Debug, Default)]
-struct SparkJsonEncoderFactory;
+#[derive(Debug)]
+struct SparkJsonEncoderFactory {
+    /// `datafusion.execution.time_zone`; timestamps with a time zone are
+    /// written in this zone
+    session_tz: Tz,
+}
 
 impl EncoderFactory for SparkJsonEncoderFactory {
     fn make_default_encoder<'a>(
@@ -204,9 +237,100 @@ impl EncoderFactory for SparkJsonEncoderFactory {
                 field,
                 array.as_primitive::<Float64Type>(),
             )?)),
+            // Spark writes timestamps as yyyy-MM-dd'T'HH:mm:ss.SSS, instants in
+            // the session time zone with their offset; arrow-json keeps the full
+            // precision and uses the time zone recorded on the type
+            DataType::Timestamp(unit, tz) => {
+                let session_tz = tz.as_ref().map(|_| self.session_tz);
+                Ok(Some(match unit {
+                    TimeUnit::Second => timestamp_encoder(
+                        array.as_primitive::<TimestampSecondType>(),
+                        session_tz,
+                    )?,
+                    TimeUnit::Millisecond => timestamp_encoder(
+                        array.as_primitive::<TimestampMillisecondType>(),
+                        session_tz,
+                    )?,
+                    TimeUnit::Microsecond => timestamp_encoder(
+                        array.as_primitive::<TimestampMicrosecondType>(),
+                        session_tz,
+                    )?,
+                    TimeUnit::Nanosecond => timestamp_encoder(
+                        array.as_primitive::<TimestampNanosecondType>(),
+                        session_tz,
+                    )?,
+                }))
+            }
             // everything else uses arrow's default encoder
             _ => Ok(None),
         }
+    }
+}
+
+/// Spark's default `timestampFormat`, `yyyy-MM-dd'T'HH:mm:ss[.SSS][XXX]`,
+/// without the offset part (added separately so that UTC is written as `Z`).
+const SPARK_TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.3f";
+
+/// Builds an encoder that writes timestamps the way Spark does.
+///
+/// `session_tz` is `Some` for a timestamp with a time zone (a Spark
+/// `TIMESTAMP`, an instant written in the session time zone with its offset)
+/// and `None` for one without (`TIMESTAMP_NTZ`, written as is). The values
+/// are formatted here, where an out-of-range value can be reported, so that
+/// `encode` only has to copy them.
+fn timestamp_encoder<'a, T: ArrowTimestampType>(
+    array: &'a PrimitiveArray<T>,
+    session_tz: Option<Tz>,
+) -> Result<NullableEncoder<'a>, ArrowError> {
+    let mut texts = StringBuilder::with_capacity(array.len(), array.len() * 30);
+    for value in array.iter() {
+        match value {
+            Some(v) => texts.append_value(spark_timestamp_text::<T>(v, session_tz)?),
+            None => texts.append_null(),
+        }
+    }
+    Ok(NullableEncoder::new(
+        Box::new(QuotedTextEncoder(texts.finish())),
+        array.nulls().cloned(),
+    ))
+}
+
+/// Formats one timestamp value as Spark's `to_json` does.
+fn spark_timestamp_text<T: ArrowTimestampType>(
+    value: i64,
+    session_tz: Option<Tz>,
+) -> Result<String, ArrowError> {
+    let out_of_range = || {
+        ArrowError::JsonError(format!(
+            "to_json: timestamp value {value} ({:?}) is out of range",
+            T::UNIT
+        ))
+    };
+    match session_tz {
+        Some(tz) => {
+            let dt =
+                as_datetime_with_timezone::<T>(value, tz).ok_or_else(out_of_range)?;
+            let offset = dt.format("%:z").to_string();
+            // Java's `XXX` pattern writes a zero offset as `Z`
+            let offset = if offset == "+00:00" { "Z" } else { &offset };
+            Ok(format!("{}{offset}", dt.format(SPARK_TIMESTAMP_FORMAT)))
+        }
+        None => Ok(as_datetime::<T>(value)
+            .ok_or_else(out_of_range)?
+            .format(SPARK_TIMESTAMP_FORMAT)
+            .to_string()),
+    }
+}
+
+/// Writes pre-formatted text as a JSON string. The text must not need
+/// escaping (timestamps are digits and `-T:.+Z` only).
+struct QuotedTextEncoder(StringArray);
+
+impl Encoder for QuotedTextEncoder {
+    fn encode(&mut self, idx: usize, out: &mut Vec<u8>) {
+        out.push(b'"');
+        out.extend_from_slice(self.0.value(idx).as_bytes());
+        out.push(b'"');
     }
 }
 
@@ -447,7 +571,7 @@ mod tests {
         BinaryArray, BinaryBuilder, BinaryViewArray, BooleanArray, FixedSizeBinaryArray,
         Float32Array, Float64Array, Float64Builder, Int32Array, Int32Builder, Int64Array,
         LargeBinaryArray, ListBuilder, MapBuilder, StringArray, StructArray,
-        StructBuilder,
+        StructBuilder, TimestampMicrosecondArray, TimestampSecondArray,
     };
     use arrow::buffer::NullBuffer;
     use arrow::datatypes::{Field, Fields};
@@ -457,6 +581,15 @@ mod tests {
     /// Runs to_json over input (whose type is described by `field`) and
     /// returns the resulting string array.
     fn run(input: ColumnarValue, field: FieldRef) -> Result<ArrayRef> {
+        run_with_config(input, field, ConfigOptions::default())
+    }
+
+    /// Like `run`, with the session configuration (e.g. the time zone).
+    fn run_with_config(
+        input: ColumnarValue,
+        field: FieldRef,
+        config: ConfigOptions,
+    ) -> Result<ArrayRef> {
         let number_rows = match &input {
             ColumnarValue::Array(a) => a.len(),
             ColumnarValue::Scalar(_) => 1,
@@ -466,7 +599,7 @@ mod tests {
             arg_fields: vec![field],
             number_rows,
             return_field: Field::new("to_json", DataType::Utf8, true).into(),
-            config_options: Arc::new(ConfigOptions::default()),
+            config_options: Arc::new(config),
         };
         SparkToJson::new()
             .invoke_with_args(args)?
@@ -536,7 +669,8 @@ mod tests {
         let field = field_of(&input);
         let array = Arc::new(input) as ArrayRef;
 
-        let spark = encode_struct_rows(&field, &array, &spark_encoder_options()).unwrap();
+        let spark_options = spark_encoder_options(&ConfigOptions::default()).unwrap();
+        let spark = encode_struct_rows(&field, &array, &spark_options).unwrap();
         let spark = as_string_array(&spark).unwrap();
         assert_eq!(spark.value(1), r#"{"a":2,"c":false}"#);
 
@@ -923,6 +1057,88 @@ mod tests {
             err.to_string()
                 .contains("to_json: unsupported map key type"),
             "unexpected error: {err}"
+        );
+    }
+    /// 2024-01-01 01:02:03.123456 UTC, in microseconds since the epoch
+    const TS_MICROS: i64 = 1_704_070_923_123_456;
+
+    #[test]
+    fn test_timestamps_use_spark_format_and_session_time_zone() {
+        // ltz: Timestamp(us, "UTC") -> Spark TIMESTAMP (an instant)
+        // ntz: Timestamp(us, None)  -> Spark TIMESTAMP_NTZ (a wall-clock time)
+        let ltz = Arc::new(
+            TimestampMicrosecondArray::from(vec![Some(TS_MICROS), None])
+                .with_timezone("UTC"),
+        ) as ArrayRef;
+        let ntz = Arc::new(TimestampMicrosecondArray::from(vec![Some(TS_MICROS), None]))
+            as ArrayRef;
+        let fields = Fields::from(vec![
+            Field::new("ltz", ltz.data_type().clone(), true),
+            Field::new("ntz", ntz.data_type().clone(), true),
+        ]);
+        let input = Arc::new(StructArray::new(fields, vec![ltz, ntz], None));
+        let field = field_of(&input);
+
+        // default session time zone (UTC): milliseconds, offset written as `Z`
+        let out = run(
+            ColumnarValue::Array(Arc::clone(&input) as ArrayRef),
+            Arc::clone(&field),
+        )
+        .unwrap();
+        let out = as_string_array(&out).unwrap();
+        assert_eq!(
+            out.value(0),
+            r#"{"ltz":"2024-01-01T01:02:03.123Z","ntz":"2024-01-01T01:02:03.123"}"#
+        );
+        // NULL timestamps are NULL struct fields -> omitted
+        assert_eq!(out.value(1), "{}");
+
+        // the instant is written in the session time zone with its offset;
+        // the wall-clock value is unchanged
+        let mut config = ConfigOptions::default();
+        config
+            .set("datafusion.execution.time_zone", "+02:00")
+            .unwrap();
+        let out = run_with_config(ColumnarValue::Array(input), field, config).unwrap();
+        let out = as_string_array(&out).unwrap();
+        assert_eq!(
+            out.value(0),
+            r#"{"ltz":"2024-01-01T03:02:03.123+02:00","ntz":"2024-01-01T01:02:03.123"}"#
+        );
+    }
+
+    #[test]
+    fn test_timestamp_type_time_zone_is_ignored_and_precision_is_millis() {
+        // Spark has no per-column time zone: the zone recorded on the Arrow
+        // type does not change the output, only the session time zone does
+        let plus5 = Arc::new(
+            TimestampMicrosecondArray::from(vec![Some(TS_MICROS)])
+                .with_timezone("+05:00"),
+        ) as ArrayRef;
+        // whole seconds still get three fractional digits; a nested list too
+        let secs = Arc::new(
+            TimestampSecondArray::from(vec![Some(TS_MICROS / 1_000_000)])
+                .with_timezone("UTC"),
+        ) as ArrayRef;
+        let mut l =
+            ListBuilder::new(TimestampSecondArray::builder(1).with_timezone("UTC"));
+        l.values().append_value(TS_MICROS / 1_000_000);
+        l.append(true);
+        let l = Arc::new(l.finish()) as ArrayRef;
+
+        let fields = Fields::from(vec![
+            Field::new("plus5", plus5.data_type().clone(), true),
+            Field::new("secs", secs.data_type().clone(), true),
+            Field::new("l", l.data_type().clone(), true),
+        ]);
+        let input = StructArray::new(fields, vec![plus5, secs, l], None);
+        let field = field_of(&input);
+
+        let out = run(ColumnarValue::Array(Arc::new(input)), field).unwrap();
+        let out = as_string_array(&out).unwrap();
+        assert_eq!(
+            out.value(0),
+            r#"{"plus5":"2024-01-01T01:02:03.123Z","secs":"2024-01-01T01:02:03.000Z","l":["2024-01-01T01:02:03.000Z"]}"#
         );
     }
 }
@@ -1326,5 +1542,40 @@ mod dataframe_tests {
             ),
         ])
         .await
+    }
+    #[tokio::test]
+    async fn to_json_timestamps_sql() -> Result<()> {
+        assert_sql_json(&[
+            // TIMESTAMP (instant): milliseconds, session time zone offset (`Z` for UTC)
+            (
+                "named_struct('t', arrow_cast('2024-01-01T01:02:03.123456Z', 'Timestamp(Microsecond, Some(\"UTC\"))'))",
+                r#"{"t":"2024-01-01T01:02:03.123Z"}"#,
+            ),
+            // TIMESTAMP_NTZ: no offset, no conversion
+            (
+                "named_struct('t', TIMESTAMP '2024-01-01 01:02:03.123456')",
+                r#"{"t":"2024-01-01T01:02:03.123"}"#,
+            ),
+        ])
+        .await?;
+
+        // the session time zone decides how an instant is written
+        let ctx = SessionContext::new();
+        ctx.register_udf((*crate::function::json::to_json()).clone());
+        ctx.sql("SET datafusion.execution.time_zone = '+02:00'")
+            .await?
+            .collect()
+            .await?;
+        let batches = ctx
+            .sql(
+                "SELECT to_json(named_struct('t', arrow_cast('2024-01-01T01:02:03.123456Z', \
+                 'Timestamp(Microsecond, Some(\"UTC\"))'))) AS j",
+            )
+            .await?
+            .collect()
+            .await?;
+        let j = as_string_array(batches[0].column(0))?;
+        assert_eq!(j.value(0), r#"{"t":"2024-01-01T03:02:03.123+02:00"}"#);
+        Ok(())
     }
 }
