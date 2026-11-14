@@ -23,7 +23,7 @@ use arrow::json::writer::{
     Encoder, EncoderFactory, EncoderOptions, NullableEncoder, make_encoder,
 };
 use arrow::temporal_conversions::{
-    MICROSECONDS, MILLISECONDS, MILLISECONDS_IN_DAY, NANOSECONDS, as_datetime,
+    MICROSECONDS, MILLISECONDS, MILLISECONDS_IN_DAY, NANOSECONDS, as_date, as_datetime,
     as_datetime_with_timezone,
 };
 use base64::Engine as _;
@@ -64,6 +64,7 @@ use datafusion_functions::core::expr_fn::named_struct;
 ///   declared scale: `1.50`, `0.000001`, and scientific notation when the
 ///   adjusted exponent is below -6 (`0E-10`, `1.0E-7`). These are unquoted
 ///   JSON numbers, as Spark writes them.
+/// - Dates are written as `yyyy-MM-dd`
 /// - Timestamps are written as `yyyy-MM-dd'T'HH:mm:ss.SSS` (milliseconds,
 ///   truncated). A timestamp with a time zone is an instant and is written in
 ///   the session time zone (`datafusion.execution.time_zone`, UTC by default)
@@ -71,6 +72,8 @@ use datafusion_functions::core::expr_fn::named_struct;
 ///   not used, as in Spark. A timestamp without a time zone (`TIMESTAMP_NTZ`)
 ///   is written as is, without an offset.
 /// - Nested structs, lists and maps are serialized recursively
+/// - Types with no Spark JSON text (intervals, durations, times, Float16,
+///   unions, map keys outside the types above) are rejected at planning time
 ///
 /// The serialization is done batch by batch with the arrow-json row encoder:
 /// an encoder is built once per input array and each row is written straight
@@ -109,7 +112,12 @@ impl ScalarUDFImpl for SparkToJson {
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         match arg_types {
-            [DataType::Struct(_)] => Ok(DataType::Utf8),
+            [DataType::Struct(fields)] => {
+                for field in fields {
+                    check_spark_json_type(field.data_type(), field.name())?;
+                }
+                Ok(DataType::Utf8)
+            }
             [other] => plan_err!("to_json expects a struct argument, got {other}"),
             _ => plan_err!(
                 "to_json expects exactly one argument, got {}",
@@ -146,6 +154,49 @@ impl ScalarUDFImpl for SparkToJson {
 }
 
 /// Serializes a struct array with Spark's output rules.
+/// Rejects types that have no faithful Spark JSON text. `path` names the
+/// field in the error (`a.b[]` for the elements of list `b` in struct `a`).
+fn check_spark_json_type(data_type: &DataType, path: &str) -> Result<()> {
+    use DataType::*;
+    match data_type {
+        Null | Boolean | Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32
+        | UInt64 | Float32 | Float64 | Decimal32(..) | Decimal64(..) | Decimal128(..)
+        | Decimal256(..) | Utf8 | LargeUtf8 | Utf8View | Binary | LargeBinary
+        | BinaryView | FixedSizeBinary(_) | Date32 | Date64 | Timestamp(..) => Ok(()),
+        List(item)
+        | LargeList(item)
+        | FixedSizeList(item, _)
+        | ListView(item)
+        | LargeListView(item) => {
+            check_spark_json_type(item.data_type(), &format!("{path}[]"))
+        }
+        Struct(fields) => fields.iter().try_for_each(|f| {
+            check_spark_json_type(f.data_type(), &format!("{path}.{}", f.name()))
+        }),
+        Map(entries, _) => {
+            let Struct(kv) = entries.data_type() else {
+                return plan_err!("to_json: field {path} is a map without entries");
+            };
+            if !is_spark_map_key_type(kv[0].data_type()) {
+                return plan_err!(
+                    "to_json: field {path} has map key type {}, which is not supported",
+                    kv[0].data_type()
+                );
+            }
+            check_spark_json_type(kv[1].data_type(), &format!("{path}[]"))
+        }
+        // encodings rather than logical types: the values are what is written
+        Dictionary(_, values) => check_spark_json_type(values, path),
+        RunEndEncoded(_, values) => check_spark_json_type(values.data_type(), path),
+        // Spark's interval text depends on the start and end fields (INTERVAL
+        // '1' DAY vs INTERVAL '1 00:00:00' DAY TO SECOND), which Arrow does not
+        // record; durations, times, Float16 and unions have no Spark type
+        other => plan_err!(
+            "to_json: field {path} has type {other}, which has no Spark JSON representation"
+        ),
+    }
+}
+
 fn struct_to_json(
     field: &FieldRef,
     array: &ArrayRef,
@@ -292,6 +343,11 @@ impl EncoderFactory for SparkJsonEncoderFactory {
                     )?,
                 }))
             }
+            // Spark writes dates as yyyy-MM-dd; arrow-json writes a Date64 as a
+            // datetime (a Date32 already comes out as a date)
+            DataType::Date64 => {
+                Ok(Some(date64_encoder(array.as_primitive::<Date64Type>())?))
+            }
             // everything else uses arrow's default encoder
             _ => Ok(None),
         }
@@ -353,8 +409,32 @@ fn spark_timestamp_text<T: ArrowTimestampType>(
     }
 }
 
+/// Formats `Date64` values as `yyyy-MM-dd`.
+fn date64_encoder(
+    array: &PrimitiveArray<Date64Type>,
+) -> Result<NullableEncoder<'_>, ArrowError> {
+    let mut texts = StringBuilder::with_capacity(array.len(), array.len() * 10);
+    for value in array.iter() {
+        match value {
+            Some(ms) => {
+                let date = as_date::<Date64Type>(ms).ok_or_else(|| {
+                    ArrowError::JsonError(format!(
+                        "to_json: date value {ms} (ms) is out of range"
+                    ))
+                })?;
+                texts.append_value(date.format("%Y-%m-%d").to_string());
+            }
+            None => texts.append_null(),
+        }
+    }
+    Ok(NullableEncoder::new(
+        Box::new(QuotedTextEncoder(texts.finish())),
+        array.nulls().cloned(),
+    ))
+}
+
 /// Writes pre-formatted text as a JSON string. The text must not need
-/// escaping (timestamps are digits and `-T:.+Z` only).
+/// escaping (timestamps and dates are digits and `-T:.+Z` only).
 struct QuotedTextEncoder(StringArray);
 
 impl Encoder for QuotedTextEncoder {
@@ -674,6 +754,34 @@ fn spark_map_key_texts(keys: &ArrayRef) -> Result<StringArray, ArrowError> {
     })
 }
 
+/// The map key types `spark_map_key_texts` can stringify.
+fn is_spark_map_key_type(data_type: &DataType) -> bool {
+    use DataType::*;
+    matches!(
+        data_type,
+        Utf8 | LargeUtf8
+            | Utf8View
+            | Boolean
+            | Int8
+            | Int16
+            | Int32
+            | Int64
+            | UInt8
+            | UInt16
+            | UInt32
+            | UInt64
+            | Float32
+            | Float64
+            | Date32
+            | Date64
+            | Timestamp(..)
+            | Decimal32(..)
+            | Decimal64(..)
+            | Decimal128(..)
+            | Decimal256(..)
+    )
+}
+
 /// Formats each key with `f` (NULL keys have been rejected already).
 fn key_texts<T: ArrowPrimitiveType>(
     keys: &PrimitiveArray<T>,
@@ -821,14 +929,16 @@ mod tests {
 
     use arrow::array::{
         BinaryArray, BinaryBuilder, BinaryViewArray, BooleanArray, Date32Array,
-        Date64Array, Decimal32Array, Decimal128Array, Decimal256Array,
+        Date64Array, Decimal32Array, Decimal128Array, Decimal256Array, DictionaryArray,
         FixedSizeBinaryArray, Float32Array, Float64Array, Float64Builder, Int32Array,
         Int32Builder, Int64Array, LargeBinaryArray, ListArray, ListBuilder, MapBuilder,
         StringArray, StructArray, TimestampMicrosecondArray, TimestampNanosecondArray,
         TimestampSecondArray, UInt8Array,
     };
     use arrow::buffer::NullBuffer;
-    use arrow::datatypes::{Field, Fields, Int32Type, i256};
+    use arrow::datatypes::{
+        Field, Fields, Int32Type, IntervalUnit, UnionFields, UnionMode, i256,
+    };
     use datafusion_common::cast::as_string_array;
     use datafusion_common::config::ConfigOptions;
 
@@ -886,6 +996,165 @@ mod tests {
             func.return_type(&[DataType::Struct(fields)]).unwrap(),
             DataType::Utf8
         );
+    }
+
+    #[test]
+    fn test_return_type_accepts_types_with_spark_json_text() {
+        let item = |t: DataType| Arc::new(Field::new("item", t, true));
+        let map_of = |k: DataType, v: DataType| {
+            let entries = Fields::from(vec![
+                Field::new("keys", k, false),
+                Field::new("values", v, true),
+            ]);
+            DataType::Map(
+                Arc::new(Field::new("entries", DataType::Struct(entries), false)),
+                false,
+            )
+        };
+        let types = vec![
+            DataType::Null,
+            DataType::Boolean,
+            DataType::Int8,
+            DataType::UInt64,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Decimal128(10, 2),
+            DataType::Decimal256(50, 2),
+            DataType::Utf8View,
+            DataType::FixedSizeBinary(3),
+            DataType::Date32,
+            DataType::Date64,
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            DataType::List(item(DataType::Date32)),
+            DataType::FixedSizeList(item(DataType::Float64), 2),
+            DataType::Struct(Fields::from(vec![Field::new("x", DataType::Utf8, true)])),
+            map_of(DataType::Date32, DataType::List(item(DataType::Int32))),
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            DataType::RunEndEncoded(
+                Arc::new(Field::new("run_ends", DataType::Int32, false)),
+                item(DataType::Float64),
+            ),
+        ];
+        let fields: Fields = types
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| Field::new(format!("f{i}"), t, true))
+            .collect();
+        assert_eq!(
+            SparkToJson::new()
+                .return_type(&[DataType::Struct(fields)])
+                .unwrap(),
+            DataType::Utf8
+        );
+    }
+
+    #[test]
+    fn test_return_type_rejects_types_without_spark_json_text() {
+        let return_type = |name: &str, t: DataType| {
+            let fields = Fields::from(vec![Field::new(name, t, true)]);
+            SparkToJson::new()
+                .return_type(&[DataType::Struct(fields)])
+                .unwrap_err()
+                .to_string()
+        };
+        let item = |t: DataType| Arc::new(Field::new("item", t, true));
+        let union = DataType::Union(
+            UnionFields::from_fields(vec![Field::new("a", DataType::Int32, true)]),
+            UnionMode::Sparse,
+        );
+
+        for t in [
+            DataType::Interval(IntervalUnit::YearMonth),
+            DataType::Interval(IntervalUnit::DayTime),
+            DataType::Interval(IntervalUnit::MonthDayNano),
+            DataType::Duration(TimeUnit::Second),
+            DataType::Time32(TimeUnit::Second),
+            DataType::Time64(TimeUnit::Microsecond),
+            DataType::Float16,
+            union,
+        ] {
+            let err = return_type("x", t.clone());
+            assert!(
+                err.contains(&format!(
+                    "field x has type {t}, which has no Spark JSON representation"
+                )),
+                "unexpected error for {t}: {err}"
+            );
+        }
+
+        // nested types report the path to the offending field
+        let interval = DataType::Interval(IntervalUnit::DayTime);
+        let err = return_type("l", DataType::List(item(interval.clone())));
+        assert!(err.contains("field l[] has type"), "{err}");
+
+        let inner = Fields::from(vec![Field::new("i", interval.clone(), true)]);
+        let err = return_type("s", DataType::Struct(inner));
+        assert!(err.contains("field s.i has type"), "{err}");
+
+        let entries = Fields::from(vec![
+            Field::new("keys", DataType::Utf8, false),
+            Field::new("values", interval.clone(), true),
+        ]);
+        let entries = Arc::new(Field::new("entries", DataType::Struct(entries), false));
+        let err = return_type("m", DataType::Map(entries, false));
+        assert!(err.contains("field m[] has type"), "{err}");
+
+        let err = return_type(
+            "d",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(interval)),
+        );
+        assert!(err.contains("field d has type Interval(DayTime)"), "{err}");
+
+        // map keys are checked too (lists have no Spark key text)
+        let entries = Fields::from(vec![
+            Field::new("keys", DataType::List(item(DataType::Int32)), false),
+            Field::new("values", DataType::Int32, true),
+        ]);
+        let entries = Arc::new(Field::new("entries", DataType::Struct(entries), false));
+        let err = return_type("m", DataType::Map(entries, false));
+        assert!(
+            err.contains("field m has map key type List(")
+                && err.contains("not supported"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_dates_are_written_as_yyyy_mm_dd() {
+        // 2024-01-01 is day 19723; the Date64 is one millisecond into that day
+        let d32 = Arc::new(Date32Array::from(vec![Some(19723), None])) as ArrayRef;
+        let d64 = Arc::new(Date64Array::from(vec![
+            Some(19723 * MILLISECONDS_IN_DAY + 1),
+            None,
+        ])) as ArrayRef;
+        let fields = Fields::from(vec![
+            Field::new("d32", DataType::Date32, true),
+            Field::new("d64", DataType::Date64, true),
+        ]);
+        let input = StructArray::new(fields, vec![d32, d64], None);
+        let field = field_of(&input);
+
+        let out = run(ColumnarValue::Array(Arc::new(input)), field).unwrap();
+        let out = as_string_array(&out).unwrap();
+        assert_eq!(out.value(0), r#"{"d32":"2024-01-01","d64":"2024-01-01"}"#);
+        assert_eq!(out.value(1), "{}");
+    }
+
+    #[test]
+    fn test_dictionary_values_use_spark_encoders() {
+        // Dictionary<Int32, Float64> [1e10, 1e10]: the float rule applies to the values
+        let values = Arc::new(Float64Array::from(vec![1e10])) as ArrayRef;
+        let dict =
+            DictionaryArray::<Int32Type>::new(Int32Array::from(vec![0, 0]), values);
+        let dict = Arc::new(dict) as ArrayRef;
+        let fields = Fields::from(vec![Field::new("x", dict.data_type().clone(), true)]);
+        let input = StructArray::new(fields, vec![dict], None);
+        let field = field_of(&input);
+
+        let out = run(ColumnarValue::Array(Arc::new(input)), field).unwrap();
+        let out = as_string_array(&out).unwrap();
+        assert_eq!(out.value(0), r#"{"x":1.0E10}"#);
+        assert_eq!(out.value(1), r#"{"x":1.0E10}"#);
     }
 
     #[test]
@@ -1941,13 +2210,18 @@ mod dataframe_tests {
     /// The `datafusion` dev-dependency is built without the
     /// `nested_expressions` feature, so the nested functions used to build
     /// test values (`make_array`, `map`, ...) are registered here explicitly.
-    async fn assert_sql_json(cases: &[(&str, &str)]) -> Result<()> {
+    /// A context with to_json and the nested functions (map, make_array).
+    fn to_json_ctx() -> SessionContext {
         let ctx = SessionContext::new();
         ctx.register_udf((*crate::function::json::to_json()).clone());
         for udf in datafusion_functions_nested::all_default_nested_functions() {
             ctx.register_udf((*udf).clone());
         }
+        ctx
+    }
 
+    async fn assert_sql_json(cases: &[(&str, &str)]) -> Result<()> {
+        let ctx = to_json_ctx();
         for (expr, expected) in cases {
             let batches = ctx
                 .sql(&format!("SELECT to_json({expr}) AS j"))
@@ -1958,6 +2232,59 @@ mod dataframe_tests {
             assert_eq!(j.value(0), *expected, "expression: {expr}");
         }
         Ok(())
+    }
+
+    /// Asserts that planning `to_json(expr)` fails with a message containing `needle`.
+    async fn assert_sql_plan_error(expr: &str, needle: &str) {
+        let err = to_json_ctx()
+            .sql(&format!("SELECT to_json({expr})"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_contains!(err, needle);
+    }
+
+    #[tokio::test]
+    async fn to_json_rejects_types_without_spark_json_text_sql() {
+        assert_sql_plan_error(
+            "named_struct('i', INTERVAL '1' DAY)",
+            "field i has type Interval(MonthDayNano), which has no Spark JSON representation",
+        )
+        .await;
+        assert_sql_plan_error(
+            "named_struct('s', named_struct('l', make_array(INTERVAL '1' DAY)))",
+            "field s.l[] has type Interval(MonthDayNano)",
+        )
+        .await;
+        assert_sql_plan_error(
+            "named_struct('m', map(make_array(make_array(1)), make_array(1)))",
+            "field m has map key type List(",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn to_json_dates_and_dictionaries_sql() -> Result<()> {
+        assert_sql_json(&[
+            (
+                "named_struct('d', DATE '2024-01-01')",
+                r#"{"d":"2024-01-01"}"#,
+            ),
+            (
+                "named_struct('d', arrow_cast(DATE '2024-01-01', 'Date64'))",
+                r#"{"d":"2024-01-01"}"#,
+            ),
+            // dictionary-encoded values are written like their values
+            (
+                "named_struct('s', arrow_cast('a', 'Dictionary(Int32, Utf8)'))",
+                r#"{"s":"a"}"#,
+            ),
+            (
+                "named_struct('f', arrow_cast(1e10, 'Dictionary(Int32, Float64)'))",
+                r#"{"f":1.0E10}"#,
+            ),
+        ])
+        .await
     }
 
     #[tokio::test]
