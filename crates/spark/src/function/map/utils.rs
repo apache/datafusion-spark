@@ -220,7 +220,7 @@ fn map_deduplicate_keys(
                         "[DUPLICATED_MAP_KEY] Duplicate map key {key} was found, \
                          please check the input data. To allow duplicate keys with \
                          last-value-wins semantics, set \
-                         `datafusion.spark.map_key_dedup_policy` to `LAST_WIN`."
+                         `spark.map_key_dedup_policy` to `LAST_WIN`."
                     );
                 }
                 keys_mask_builder.append_value(true);
