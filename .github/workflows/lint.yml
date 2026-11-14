@@ -29,3 +29,18 @@ jobs:
       - run: rustup toolchain install stable --profile minimal --component clippy --no-self-update && rustup default stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features --workspace -- -D warnings
+
+  function-docs:
+    name: function docs up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - run: dev/update_function_docs.sh
+      - name: Check docs/functions.md is up to date
+        run: |
+          if ! git diff --exit-code -- docs/functions.md; then
+            echo "docs/functions.md is out of date. Run dev/update_function_docs.sh and commit the result."
+            exit 1
+          fi
