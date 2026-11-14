@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
-use std::sync::{Arc, LazyLock};
+use std::fmt::LowerExp;
+use std::sync::Arc;
 
 use arrow::array::timezone::Tz;
 use arrow::array::{
@@ -47,7 +48,10 @@ use datafusion_functions::core::expr_fn::named_struct;
 ///   NULL map entries are kept as `"key":null`
 /// - Map keys are written as strings whatever their type (`{"1":"v"}`)
 /// - Binary values are Base64 strings
-/// - Non-finite floats are the strings `"NaN"`, `"Infinity"` and `"-Infinity"`
+/// - Floats are written like Java's `Double.toString` / `Float.toString`:
+///   plain decimal with at least one fraction digit for `1e-3 <= |x| < 1e7`
+///   (`1.0`, `0.001`), scientific notation otherwise (`1.0E-5`, `1.23456789E8`);
+///   non-finite values are the strings `"NaN"`, `"Infinity"` and `"-Infinity"`
 /// - Timestamps are written as `yyyy-MM-dd'T'HH:mm:ss.SSS` (milliseconds,
 ///   truncated). A timestamp with a time zone is an instant and is written in
 ///   the session time zone (`datafusion.execution.time_zone`, UTC by default)
@@ -227,16 +231,15 @@ impl EncoderFactory for SparkJsonEncoderFactory {
             DataType::FixedSizeBinary(_) => {
                 Ok(Some(base64_encoder(array.as_fixed_size_binary())))
             }
-            // Spark writes non-finite floats as the strings "NaN", "Infinity"
-            // and "-Infinity"; arrow-json writes JSON null, which loses the value
+            // Spark writes floats like Java's Double.toString (1.0E-5, 1.0) and
+            // non-finite values as the strings "NaN", "Infinity" and "-Infinity";
+            // arrow-json writes 0.00001 and JSON null
             DataType::Float32 => Ok(Some(spark_float_encoder(
-                field,
                 array.as_primitive::<Float32Type>(),
-            )?)),
+            ))),
             DataType::Float64 => Ok(Some(spark_float_encoder(
-                field,
                 array.as_primitive::<Float64Type>(),
-            )?)),
+            ))),
             // Spark writes timestamps as yyyy-MM-dd'T'HH:mm:ss.SSS, instants in
             // the session time zone with their offset; arrow-json keeps the full
             // precision and uses the time zone recorded on the type
@@ -334,14 +337,8 @@ impl Encoder for QuotedTextEncoder {
     }
 }
 
-/// arrow-json's default options, used to build the inner encoders that the
-/// Spark overrides delegate to (going through `SparkJsonEncoderFactory` again
-/// for the same array would recurse).
-static ARROW_DEFAULT_OPTIONS: LazyLock<EncoderOptions> =
-    LazyLock::new(EncoderOptions::default);
-
-/// Floating point types whose non-finite values Spark serializes as strings.
-trait SparkFloat: Copy {
+/// Floating point types that Spark serializes like Java's `Double.toString`.
+trait SparkFloat: Copy + LowerExp {
     /// The JSON text Spark emits for a non-finite value, or `None` if finite.
     fn non_finite_json(self) -> Option<&'static [u8]>;
 }
@@ -367,38 +364,87 @@ macro_rules! spark_float {
 }
 spark_float!(f32, f64);
 
-/// Builds a float encoder that writes finite values exactly like arrow-json
-/// and non-finite values the way Spark does.
-fn spark_float_encoder<'a, T>(
-    field: &'a FieldRef,
-    array: &'a PrimitiveArray<T>,
-) -> Result<NullableEncoder<'a>, ArrowError>
+/// Formats a finite float the way Java's `Double.toString` / `Float.toString`
+/// do, which is what Spark's `to_json` writes:
+///
+/// - `1e-3 <= |x| < 1e7`: plain decimal with at least one fraction digit
+///   (`1.0`, `0.001`, `123.456`)
+/// - otherwise: scientific notation `d.dddE<exp>` with at least one fraction
+///   digit and no `+` in the exponent (`1.0E-5`, `1.23456789E8`, `1.0E10`)
+///
+/// The digits are the shortest that round-trip, taken from Rust's `{:e}`
+/// formatting, which is also what Java produces (JDK 19+; older JDKs
+/// occasionally emit one more digit).
+fn java_float_text<F: LowerExp>(value: F) -> String {
+    // e.g. "1.23456789e8", "1e-5", "-0e0"
+    let exp_form = format!("{value:e}");
+    let (sign, rest) = match exp_form.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", exp_form.as_str()),
+    };
+    // `{:e}` always has the form <digits>[.<digits>]e<exp>; if it ever did
+    // not, the exponent form is still a valid JSON number
+    let Some((mantissa, exp)) = rest.split_once('e') else {
+        return exp_form;
+    };
+    let Ok(exp) = exp.parse::<i32>() else {
+        return exp_form;
+    };
+    // all significant digits; `exp` is the decimal exponent of the first one
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+
+    let mut text = String::with_capacity(digits.len() + 8);
+    text.push_str(sign);
+    if (-3..7).contains(&exp) {
+        if exp < 0 {
+            text.push_str("0.");
+            text.extend(std::iter::repeat_n('0', (-exp - 1) as usize));
+            text.push_str(&digits);
+        } else {
+            let int_len = exp as usize + 1;
+            if digits.len() <= int_len {
+                text.push_str(&digits);
+                text.extend(std::iter::repeat_n('0', int_len - digits.len()));
+                text.push_str(".0");
+            } else {
+                text.push_str(&digits[..int_len]);
+                text.push('.');
+                text.push_str(&digits[int_len..]);
+            }
+        }
+    } else {
+        let (first, rest) = digits.split_at(1);
+        text.push_str(first);
+        text.push('.');
+        text.push_str(if rest.is_empty() { "0" } else { rest });
+        text.push('E');
+        text.push_str(&exp.to_string());
+    }
+    text
+}
+
+/// Builds a float encoder that writes values the way Spark does.
+fn spark_float_encoder<'a, T>(array: &'a PrimitiveArray<T>) -> NullableEncoder<'a>
 where
     T: ArrowPrimitiveType,
     T::Native: SparkFloat,
 {
-    let finite = make_encoder(field, array, &ARROW_DEFAULT_OPTIONS)?;
     let encoder = SparkFloatEncoder {
         values: array.values(),
-        finite,
     };
-    Ok(NullableEncoder::new(
-        Box::new(encoder),
-        array.nulls().cloned(),
-    ))
+    NullableEncoder::new(Box::new(encoder), array.nulls().cloned())
 }
 
 struct SparkFloatEncoder<'a, N: SparkFloat> {
     values: &'a [N],
-    /// arrow's default float encoder, used for finite values
-    finite: NullableEncoder<'a>,
 }
 
 impl<N: SparkFloat> Encoder for SparkFloatEncoder<'_, N> {
     fn encode(&mut self, idx: usize, out: &mut Vec<u8>) {
-        match self.values[idx].non_finite_json() {
+        let value = self.values[idx];
+        match value.non_finite_json() {
             Some(text) => out.extend_from_slice(text),
-            None => self.finite.encode(idx, out),
+            None => out.extend_from_slice(java_float_text(value).as_bytes()),
         }
     }
 }
@@ -1141,6 +1187,88 @@ mod tests {
             r#"{"plus5":"2024-01-01T01:02:03.123Z","secs":"2024-01-01T01:02:03.000Z","l":["2024-01-01T01:02:03.000Z"]}"#
         );
     }
+    #[test]
+    fn test_java_float_text() {
+        // Java Double.toString: plain decimal for 1e-3 <= |x| < 1e7, else scientific
+        let cases: [(f64, &str); 14] = [
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            (1.0, "1.0"),
+            (1.5, "1.5"),
+            (123.456, "123.456"),
+            (0.001, "0.001"),
+            (0.0001, "1.0E-4"),
+            (1e-5, "1.0E-5"),
+            (9999999.0, "9999999.0"),
+            (1e7, "1.0E7"),
+            (123456789.0, "1.23456789E8"),
+            (1e10, "1.0E10"),
+            (-2.5e-8, "-2.5E-8"),
+            (f64::MAX, "1.7976931348623157E308"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(java_float_text(value), expected, "value {value:?}");
+        }
+        // Float.toString uses the shortest digits of the f32 value
+        let cases: [(f32, &str); 4] = [
+            (0.1, "0.1"),
+            (1e10, "1.0E10"),
+            (3.0, "3.0"),
+            (f32::MAX, "3.4028235E38"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(java_float_text(value), expected, "value {value:?}");
+        }
+    }
+
+    #[test]
+    fn test_finite_floats_use_java_to_string() {
+        // d: Float64, f: Float32, l: List<Float64>, n: Struct<d: Float64>
+        let d =
+            Arc::new(Float64Array::from(vec![1e-5, 123456789.0, 1e10, 1.5])) as ArrayRef;
+        let f = Arc::new(Float32Array::from(vec![0.1, 1e10, 3.0, 1.5])) as ArrayRef;
+        let mut l = ListBuilder::new(Float64Builder::new());
+        for _ in 0..4 {
+            l.values().append_value(1e-5);
+            l.values().append_value(1.0);
+            l.append(true);
+        }
+        let l = Arc::new(l.finish()) as ArrayRef;
+        let n = Arc::new(StructArray::new(
+            Fields::from(vec![Field::new("d", DataType::Float64, true)]),
+            vec![Arc::clone(&d)],
+            None,
+        )) as ArrayRef;
+
+        let fields = Fields::from(vec![
+            Field::new("d", DataType::Float64, true),
+            Field::new("f", DataType::Float32, true),
+            Field::new("l", l.data_type().clone(), true),
+            Field::new("n", n.data_type().clone(), true),
+        ]);
+        let input = StructArray::new(fields, vec![d, f, l, n], None);
+        let field = field_of(&input);
+
+        let out = run(ColumnarValue::Array(Arc::new(input)), field).unwrap();
+        let out = as_string_array(&out).unwrap();
+
+        assert_eq!(
+            out.value(0),
+            r#"{"d":1.0E-5,"f":0.1,"l":[1.0E-5,1.0],"n":{"d":1.0E-5}}"#
+        );
+        assert_eq!(
+            out.value(1),
+            r#"{"d":1.23456789E8,"f":1.0E10,"l":[1.0E-5,1.0],"n":{"d":1.23456789E8}}"#
+        );
+        assert_eq!(
+            out.value(2),
+            r#"{"d":1.0E10,"f":3.0,"l":[1.0E-5,1.0],"n":{"d":1.0E10}}"#
+        );
+        assert_eq!(
+            out.value(3),
+            r#"{"d":1.5,"f":1.5,"l":[1.0E-5,1.0],"n":{"d":1.5}}"#
+        );
+    }
 }
 
 /// DataFrame-level tests: to_json used through DataFrame::with_column
@@ -1543,6 +1671,7 @@ mod dataframe_tests {
         ])
         .await
     }
+
     #[tokio::test]
     async fn to_json_timestamps_sql() -> Result<()> {
         assert_sql_json(&[
@@ -1577,5 +1706,33 @@ mod dataframe_tests {
         let j = as_string_array(batches[0].column(0))?;
         assert_eq!(j.value(0), r#"{"t":"2024-01-01T03:02:03.123+02:00"}"#);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn to_json_floats_use_java_to_string_sql() -> Result<()> {
+        assert_sql_json(&[
+            ("named_struct('x', 1e-5)", r#"{"x":1.0E-5}"#),
+            (
+                "named_struct('x', CAST(123456789 AS DOUBLE))",
+                r#"{"x":1.23456789E8}"#,
+            ),
+            ("named_struct('x', 1e10)", r#"{"x":1.0E10}"#),
+            ("named_struct('x', 1.0)", r#"{"x":1.0}"#),
+            ("named_struct('x', 0.001)", r#"{"x":0.001}"#),
+            (
+                "named_struct('x', arrow_cast(0.1, 'Float32'))",
+                r#"{"x":0.1}"#,
+            ),
+            // nested in a list and a map value
+            (
+                "named_struct('l', make_array(1e-5, 1.0))",
+                r#"{"l":[1.0E-5,1.0]}"#,
+            ),
+            (
+                "named_struct('m', map(make_array('k'), make_array(1e10)))",
+                r#"{"m":{"k":1.0E10}}"#,
+            ),
+        ])
+        .await
     }
 }
