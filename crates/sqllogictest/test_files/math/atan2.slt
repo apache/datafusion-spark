@@ -158,10 +158,11 @@ SELECT atan2(-0.0::double, -0.0::double);
 ----
 0
 
-# array path, including a NULL row
+# array path, including a NULL row and signed zero
 query R
-SELECT atan2(a, b) FROM (VALUES (0.0::double, 1.0::double), (1.0::double, 1.0::double), (NULL::double, 1.0::double)) AS t(a, b);
+SELECT atan2(a, b) FROM (VALUES (0.0::double, 1.0::double), (1.0::double, 1.0::double), (NULL::double, 1.0::double), (-0.0::double, -1.0::double)) AS t(a, b);
 ----
 0
 0.785398163397448
 NULL
+3.141592653589793
