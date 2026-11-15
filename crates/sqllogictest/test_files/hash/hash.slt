@@ -4,7 +4,7 @@
 
 # Tests for Spark-compatible hash (32-bit Murmur3, seed 42)
 # Reference: https://spark.apache.org/docs/latest/api/sql/index.html#hash
-# Expected values come from Comet's Spark-verified murmur3 tests.
+# Expected values were checked against Spark 4.2.0 (PySpark).
 
 # Int32
 
@@ -390,6 +390,178 @@ FROM VALUES ('x'), ('x');
 ----
 -1305545736
 -1305545736
+
+# Booleans hash as INT 1 or 0
+
+query I
+SELECT hash(true);
+----
+-559580957
+
+query I
+SELECT hash(false);
+----
+933211791
+
+# TINYINT and SMALLINT widen to INT before hashing
+
+query I
+SELECT hash(CAST(1 AS TINYINT));
+----
+-559580957
+
+query I
+SELECT hash(CAST(0 AS TINYINT));
+----
+933211791
+
+query I
+SELECT hash(CAST(-1 AS TINYINT));
+----
+-1604776387
+
+query I
+SELECT hash(CAST(127 AS TINYINT));
+----
+1135925485
+
+query I
+SELECT hash(CAST(-128 AS TINYINT));
+----
+1110053733
+
+query I
+SELECT hash(CAST(1 AS SMALLINT));
+----
+-559580957
+
+query I
+SELECT hash(CAST(-1 AS SMALLINT));
+----
+-1604776387
+
+query I
+SELECT hash(CAST(32767 AS SMALLINT));
+----
+1249274084
+
+query I
+SELECT hash(CAST(-32768 AS SMALLINT));
+----
+-1871935946
+
+# LargeUtf8 and Utf8View hash like Utf8
+
+query I
+SELECT hash(arrow_cast('hello', 'LargeUtf8'));
+----
+-1008564952
+
+query I
+SELECT hash(arrow_cast('hello', 'Utf8View'));
+----
+-1008564952
+
+# Binary hashes its bytes
+
+query I
+SELECT hash(X'0102');
+----
+1964783052
+
+# Dates hash as INT days since the epoch; Date64 (milliseconds) is floored to days
+
+query I
+SELECT hash(DATE '2020-01-01');
+----
+-725858435
+
+query I
+SELECT hash(arrow_cast(DATE '2020-01-01', 'Date64'));
+----
+-725858435
+
+query I
+SELECT hash(arrow_cast(-1, 'Date64'));
+----
+-1604776387
+
+# Timestamps hash as BIGINT microseconds since the epoch, whatever the Arrow unit.
+# DataFusion's TIMESTAMP literals are nanoseconds. Spark values are with
+# spark.sql.session.timeZone=UTC.
+
+query I
+SELECT hash(TIMESTAMP '2020-01-01 00:00:00');
+----
+-1486022740
+
+query I
+SELECT hash(arrow_cast(TIMESTAMP '2020-01-01 00:00:00', 'Timestamp(Second, None)'));
+----
+-1486022740
+
+query I
+SELECT hash(arrow_cast(TIMESTAMP '2020-01-01 00:00:00', 'Timestamp(Millisecond, None)'));
+----
+-1486022740
+
+query I
+SELECT hash(arrow_cast(TIMESTAMP '2020-01-01 00:00:00', 'Timestamp(Microsecond, None)'));
+----
+-1486022740
+
+query I
+SELECT hash(arrow_cast(TIMESTAMP '2020-01-01 00:00:00', 'Timestamp(Nanosecond, Some("UTC"))'));
+----
+-1486022740
+
+query I
+SELECT hash([TIMESTAMP '2020-01-01 00:00:00']);
+----
+-1486022740
+
+# -1 ns floors to -1 us (Spark: timestamp_micros(-1)); -1 s is -1000000 us
+query I
+SELECT hash(arrow_cast(-1, 'Timestamp(Nanosecond, None)'));
+----
+-939490007
+
+query I
+SELECT hash(arrow_cast(-1, 'Timestamp(Second, None)'));
+----
+346627249
+
+# Every NaN hashes like the canonical NaN; negating NaN flips its sign bit
+
+query I
+SELECT hash(CAST('NaN' AS DOUBLE));
+----
+-1281358385
+
+query I
+SELECT hash(-CAST('NaN' AS DOUBLE));
+----
+-1281358385
+
+query I
+SELECT hash(CAST('NaN' AS FLOAT));
+----
+-349261430
+
+query I
+SELECT hash(-CAST('NaN' AS FLOAT));
+----
+-349261430
+
+query I
+SELECT hash([CAST('NaN' AS DOUBLE), -CAST('NaN' AS DOUBLE)]);
+----
+1050078426
+
+query I
+SELECT hash([-CAST('NaN' AS FLOAT)]);
+----
+-349261430
 
 # Table data (VALUES integers are Int64, which hash as 8 bytes)
 statement ok

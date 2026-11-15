@@ -15,8 +15,10 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, DictionaryArray, PrimitiveArray};
 use arrow::compute::take;
-use arrow::datatypes::{ArrowDictionaryKeyType, ArrowNativeType, ArrowPrimitiveType};
-use datafusion_common::Result;
+use arrow::datatypes::{
+    ArrowDictionaryKeyType, ArrowNativeType, ArrowPrimitiveType, TimeUnit,
+};
+use datafusion_common::{DataFusionError, Result};
 
 /// Hash the values of a primitive array, calling `transform` to convert each
 /// value into a byte slice before feeding it to `hash_method`.
@@ -138,6 +140,60 @@ pub(crate) fn hash_dictionary_values<K: ArrowDictionaryKeyType, T: Copy>(
     Ok(())
 }
 
+/// Normalize an `f32` the way Spark does before hashing: `-0.0` hashes like
+/// `0.0`, and every NaN hashes like the canonical NaN (Java's
+/// `Float.floatToIntBits`).
+#[inline]
+pub(crate) fn normalize_f32(v: f32) -> f32 {
+    if v == 0.0 {
+        0.0
+    } else if v.is_nan() {
+        f32::from_bits(0x7fc0_0000)
+    } else {
+        v
+    }
+}
+
+/// Normalize an `f64` the way Spark does before hashing: `-0.0` hashes like
+/// `0.0`, and every NaN hashes like the canonical NaN (Java's
+/// `Double.doubleToLongBits`).
+#[inline]
+pub(crate) fn normalize_f64(v: f64) -> f64 {
+    if v == 0.0 {
+        0.0
+    } else if v.is_nan() {
+        f64::from_bits(0x7ff8_0000_0000_0000)
+    } else {
+        v
+    }
+}
+
+/// Convert a timestamp in `unit` to microseconds, the unit Spark's
+/// `TimestampType` hashes. Nanoseconds are floored, like Spark's conversion.
+#[inline]
+pub(crate) fn timestamp_to_micros(value: i64, unit: TimeUnit) -> Result<i64> {
+    let micros = match unit {
+        TimeUnit::Second => value.checked_mul(1_000_000),
+        TimeUnit::Millisecond => value.checked_mul(1_000),
+        TimeUnit::Microsecond => Some(value),
+        TimeUnit::Nanosecond => Some(value.div_euclid(1_000)),
+    };
+    micros.ok_or_else(|| {
+        DataFusionError::Execution(format!(
+            "Timestamp {value} ({unit:?}) does not fit in microseconds"
+        ))
+    })
+}
+
+/// Convert a `Date64` (milliseconds) to days, the `Int32` that Spark's
+/// `DateType` hashes. Partial days are floored.
+#[inline]
+pub(crate) fn date64_to_days(millis: i64) -> Result<i32> {
+    i32::try_from(millis.div_euclid(86_400_000)).map_err(|_| {
+        DataFusionError::Execution(format!("Date64 {millis} does not fit in Int32 days"))
+    })
+}
+
 /// The minimal big-endian two's complement bytes of an `i128`, matching Java's
 /// `BigInteger.toByteArray()` (which Spark hashes for decimals with precision
 /// greater than 18).
@@ -239,25 +295,38 @@ macro_rules! hash_array_primitive {
     };
 }
 
-/// Hash a floating-point primitive array, normalizing `-0.0` to `0.0` per Spark.
+/// Hash a floating-point primitive array after `$normalize` (Spark hashes
+/// `-0.0` like `0.0` and every NaN like the canonical NaN).
 #[macro_export]
 #[doc(hidden)]
 macro_rules! hash_array_primitive_float {
-    ($array_type:ident, $column:ident, $ty:ident, $ty2:ident, $hashes:ident, $hash_method:ident) => {
+    ($array_type:ident, $column:ident, $normalize:ident, $hashes:ident, $hash_method:ident) => {
         let array = $crate::downcast_array!($column, $array_type);
         $crate::function::hash::utils::hash_primitive_values(
             array,
             $hashes,
-            |v| {
-                // Spark uses 0 as hash for -0.0, see `Murmur3Hash` expression.
-                if v == 0.0 && v.is_sign_negative() {
-                    (0 as $ty2).to_le_bytes()
-                } else {
-                    (v as $ty).to_le_bytes()
-                }
-            },
+            |v| $crate::function::hash::utils::$normalize(v).to_le_bytes(),
             $hash_method,
         );
+    };
+}
+
+/// Hash a timestamp array in a unit other than microseconds by converting each
+/// value to microseconds first, the unit Spark's `TimestampType` hashes.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! hash_array_timestamp {
+    ($array_type:ident, $column:ident, $unit:expr, $hashes:ident, $hash_method:ident) => {
+        let array = $crate::downcast_array!($column, $array_type);
+        $crate::function::hash::utils::try_hash_bytes_values(
+            array,
+            $hashes,
+            |a, i| {
+                $crate::function::hash::utils::timestamp_to_micros(a.value(i), $unit)
+                    .map(i64::to_le_bytes)
+            },
+            $hash_method,
+        )?;
     };
 }
 
@@ -388,12 +457,12 @@ macro_rules! hash_list_with_primitive_elements {
             DataType::Float32 => {
                 let elem_array = $values.as_any().downcast_ref::<Float32Array>().unwrap();
                 $crate::hash_list_primitive!(offsets: $offsets, $list_array, elem_array, $hashes_buffer, $hash_method,
-                    |v: f32| if v == 0.0 && v.is_sign_negative() { (0_i32).to_le_bytes() } else { v.to_le_bytes() });
+                    |v: f32| $crate::function::hash::utils::normalize_f32(v).to_le_bytes());
             }
             DataType::Float64 => {
                 let elem_array = $values.as_any().downcast_ref::<Float64Array>().unwrap();
                 $crate::hash_list_primitive!(offsets: $offsets, $list_array, elem_array, $hashes_buffer, $hash_method,
-                    |v: f64| if v == 0.0 && v.is_sign_negative() { (0_i64).to_le_bytes() } else { v.to_le_bytes() });
+                    |v: f64| $crate::function::hash::utils::normalize_f64(v).to_le_bytes());
             }
             DataType::Boolean => {
                 let elem_array = $values.as_any().downcast_ref::<BooleanArray>().unwrap();
@@ -483,12 +552,12 @@ macro_rules! hash_list_with_primitive_elements {
             DataType::Float32 => {
                 let elem_array = $values.as_any().downcast_ref::<Float32Array>().unwrap();
                 $crate::hash_list_primitive!(fixed_size: $list_size, $list_array, elem_array, $hashes_buffer, $hash_method,
-                    |v: f32| if v == 0.0 && v.is_sign_negative() { (0_i32).to_le_bytes() } else { v.to_le_bytes() });
+                    |v: f32| $crate::function::hash::utils::normalize_f32(v).to_le_bytes());
             }
             DataType::Float64 => {
                 let elem_array = $values.as_any().downcast_ref::<Float64Array>().unwrap();
                 $crate::hash_list_primitive!(fixed_size: $list_size, $list_array, elem_array, $hashes_buffer, $hash_method,
-                    |v: f64| if v == 0.0 && v.is_sign_negative() { (0_i64).to_le_bytes() } else { v.to_le_bytes() });
+                    |v: f64| $crate::function::hash::utils::normalize_f64(v).to_le_bytes());
             }
             DataType::Boolean => {
                 let elem_array = $values.as_any().downcast_ref::<BooleanArray>().unwrap();
@@ -849,8 +918,7 @@ macro_rules! create_hashes_internal {
                     $crate::hash_array_primitive_float!(
                         Float32Array,
                         col,
-                        f32,
-                        i32,
+                        normalize_f32,
                         $hashes_buffer,
                         $hash_method
                     );
@@ -859,26 +927,25 @@ macro_rules! create_hashes_internal {
                     $crate::hash_array_primitive_float!(
                         Float64Array,
                         col,
-                        f64,
-                        i64,
+                        normalize_f64,
                         $hashes_buffer,
                         $hash_method
                     );
                 }
                 DataType::Timestamp(TimeUnit::Second, _) => {
-                    $crate::hash_array_primitive!(
+                    $crate::hash_array_timestamp!(
                         TimestampSecondArray,
                         col,
-                        i64,
+                        TimeUnit::Second,
                         $hashes_buffer,
                         $hash_method
                     );
                 }
                 DataType::Timestamp(TimeUnit::Millisecond, _) => {
-                    $crate::hash_array_primitive!(
+                    $crate::hash_array_timestamp!(
                         TimestampMillisecondArray,
                         col,
-                        i64,
+                        TimeUnit::Millisecond,
                         $hashes_buffer,
                         $hash_method
                     );
@@ -893,10 +960,10 @@ macro_rules! create_hashes_internal {
                     );
                 }
                 DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-                    $crate::hash_array_primitive!(
+                    $crate::hash_array_timestamp!(
                         TimestampNanosecondArray,
                         col,
-                        i64,
+                        TimeUnit::Nanosecond,
                         $hashes_buffer,
                         $hash_method
                     );
@@ -911,13 +978,17 @@ macro_rules! create_hashes_internal {
                     );
                 }
                 DataType::Date64 => {
-                    $crate::hash_array_primitive!(
-                        Date64Array,
-                        col,
-                        i64,
+                    // Spark's DateType is Int32 days; Date64 is milliseconds.
+                    let array = $crate::downcast_array!(col, Date64Array);
+                    $crate::function::hash::utils::try_hash_bytes_values(
+                        array,
                         $hashes_buffer,
-                        $hash_method
-                    );
+                        |a, i| {
+                            $crate::function::hash::utils::date64_to_days(a.value(i))
+                                .map(i32::to_le_bytes)
+                        },
+                        $hash_method,
+                    )?;
                 }
                 DataType::Utf8 => {
                     $crate::hash_array!(StringArray, col, $hashes_buffer, $hash_method);

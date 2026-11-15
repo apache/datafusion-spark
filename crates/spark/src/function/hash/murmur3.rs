@@ -30,10 +30,13 @@ const DEFAULT_SEED: u32 = 42;
         NULL arguments, NULL list elements and NULL struct fields are skipped, so the result is never NULL: \
         `hash(NULL)` returns 42. The result depends on the input type, as in Spark: INT hashes 4 bytes and BIGINT 8, \
         and integer literals are BIGINT in DataFusion but INT in Spark, so cast them to INT to match Spark's results. \
-        `-0.0` hashes like `0.0`. Decimals with precision up to 18 hash as their unscaled long, and wider decimals hash \
+        `-0.0` hashes like `0.0`, and every NaN hashes like the canonical NaN. Dates hash as INT days and \
+        timestamps as BIGINT microseconds, whatever the Arrow unit (DataFusion's TIMESTAMP literals are \
+        nanoseconds, floored to microseconds). Decimals with precision up to 18 hash as their unscaled long, and wider decimals hash \
         the minimal big-endian two's complement bytes of the unscaled value. Lists hash each element in order \
         (nested lists flatten into the same chain, and an empty list leaves the seed unchanged), structs hash each field, \
-        and maps hash each key then its value. Spark 4 rejects maps unless `spark.sql.legacy.allowHashOnMapType` is set. \
+        and maps hash each key then its value. This crate hashes maps as if Spark's `spark.sql.legacy.allowHashOnMapType` \
+        were set, where Spark 4 rejects them by default (see https://github.com/apache/datafusion-spark/issues/69). \
         Dictionary-encoded values hash like their decoded values. At least one argument is required.",
     syntax_example = "hash(expr1[, ..., exprN])",
     sql_example = r#"```sql
@@ -244,6 +247,41 @@ mod tests {
         let mut with_decoded = vec![DEFAULT_SEED; 3];
         create_murmur3_hashes(&[first, decoded], &mut with_decoded).unwrap();
         assert_eq!(with_dict, with_decoded);
+    }
+
+    /// Non-canonical NaNs (sign bit or payload set) hash like the canonical NaN,
+    /// as in Spark, both at the top level and inside lists.
+    #[test]
+    fn test_hash_non_canonical_nan() {
+        use arrow::array::{Float32Array, Float64Array, ListArray};
+        use arrow::buffer::OffsetBuffer;
+
+        let nans = vec![
+            f64::NAN,
+            -f64::NAN,
+            f64::from_bits(0x7ff0_0000_0000_0001),
+            f64::from_bits(0xfff8_dead_beef_0001),
+        ];
+        // Spark: hash(CAST('NaN' AS DOUBLE))
+        assert_eq!(
+            hash_of(Arc::new(Float64Array::from(nans.clone()))),
+            vec![-1281358385; 4]
+        );
+        let list: ArrayRef = Arc::new(ListArray::new(
+            Arc::new(Field::new_list_field(DataType::Float64, false)),
+            OffsetBuffer::new(vec![0i32, 1, 2, 3, 4].into()),
+            Arc::new(Float64Array::from(nans)),
+            None,
+        ));
+        assert_eq!(hash_of(list), vec![-1281358385; 4]);
+
+        let f32s: ArrayRef = Arc::new(Float32Array::from(vec![
+            f32::NAN,
+            -f32::NAN,
+            f32::from_bits(0x7f80_0001),
+        ]));
+        // Spark: hash(CAST('NaN' AS FLOAT))
+        assert_eq!(hash_of(f32s), vec![-349261430; 3]);
     }
 
     #[test]

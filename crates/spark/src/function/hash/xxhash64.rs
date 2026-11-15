@@ -512,6 +512,34 @@ mod tests {
         }
         assert_ne!(hashes[0], hashes[1]);
     }
+
+    /// Non-canonical NaNs (sign bit or payload set) hash like the canonical NaN,
+    /// as in Spark. Not reachable from SQL except via negation.
+    #[test]
+    fn test_xxhash64_non_canonical_nan() {
+        use arrow::array::{Float32Array, Float64Array};
+        let f64s: ArrayRef = Arc::new(Float64Array::from(vec![
+            f64::NAN,
+            -f64::NAN,
+            f64::from_bits(0x7ff0_0000_0000_0001),
+            f64::from_bits(0xfff8_dead_beef_0001),
+        ]));
+        let mut hashes = vec![DEFAULT_SEED; 4];
+        create_xxhash64_hashes(&[f64s], &mut hashes).unwrap();
+        // Spark: xxhash64(CAST('NaN' AS DOUBLE))
+        assert!(hashes.iter().all(|&h| h as i64 == -3127944061524951246));
+
+        let f32s: ArrayRef = Arc::new(Float32Array::from(vec![
+            f32::NAN,
+            -f32::NAN,
+            f32::from_bits(0x7f80_0001),
+        ]));
+        let mut hashes = vec![DEFAULT_SEED; 3];
+        create_xxhash64_hashes(&[f32s], &mut hashes).unwrap();
+        // Spark: xxhash64(CAST('NaN' AS FLOAT))
+        assert!(hashes.iter().all(|&h| h as i64 == 2692338816207849720));
+    }
+
     // An all-literal xxhash64(...) that is not constant-folded is evaluated with
     // the batch's row count while every argument is a scalar. This cannot be
     // reached from SQL.

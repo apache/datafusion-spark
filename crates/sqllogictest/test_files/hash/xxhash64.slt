@@ -295,3 +295,96 @@ query I
 SELECT xxhash64(named_struct('a', CAST(1 AS DECIMAL(20, 0))));
 ----
 6668291691252061002
+
+# Timestamps hash as BIGINT microseconds since the epoch, whatever the Arrow unit.
+# DataFusion's TIMESTAMP literals are nanoseconds. Spark values are with
+# spark.sql.session.timeZone=UTC.
+
+query I
+SELECT xxhash64(TIMESTAMP '2020-01-01 00:00:00');
+----
+7881863312764026046
+
+query I
+SELECT xxhash64(arrow_cast(TIMESTAMP '2020-01-01 00:00:00', 'Timestamp(Second, None)'));
+----
+7881863312764026046
+
+query I
+SELECT xxhash64(arrow_cast(TIMESTAMP '2020-01-01 00:00:00', 'Timestamp(Millisecond, None)'));
+----
+7881863312764026046
+
+query I
+SELECT xxhash64(arrow_cast(TIMESTAMP '2020-01-01 00:00:00', 'Timestamp(Microsecond, None)'));
+----
+7881863312764026046
+
+query I
+SELECT xxhash64([TIMESTAMP '2020-01-01 00:00:00']);
+----
+7881863312764026046
+
+# -1 ns floors to -1 us (Spark: timestamp_micros(-1)); -1 s is -1000000 us
+query I
+SELECT xxhash64(arrow_cast(-1, 'Timestamp(Nanosecond, None)'));
+----
+3858142552250413010
+
+query I
+SELECT xxhash64(arrow_cast(-1, 'Timestamp(Second, None)'));
+----
+-3302326838082710953
+
+# Dates hash as INT days since the epoch; Date64 (milliseconds) is floored to days
+
+query I
+SELECT xxhash64(DATE '2020-01-01');
+----
+2299834470729022467
+
+query I
+SELECT xxhash64(arrow_cast(DATE '2020-01-01', 'Date64'));
+----
+2299834470729022467
+
+query I
+SELECT xxhash64(arrow_cast(-1, 'Date64'));
+----
+2017008487422258757
+
+# Every NaN hashes like the canonical NaN; negating NaN flips its sign bit
+
+query I
+SELECT xxhash64(CAST('NaN' AS DOUBLE));
+----
+-3127944061524951246
+
+query I
+SELECT xxhash64(-CAST('NaN' AS DOUBLE));
+----
+-3127944061524951246
+
+query I
+SELECT xxhash64(CAST('NaN' AS FLOAT));
+----
+2692338816207849720
+
+query I
+SELECT xxhash64(-CAST('NaN' AS FLOAT));
+----
+2692338816207849720
+
+query I
+SELECT xxhash64([CAST('NaN' AS DOUBLE), -CAST('NaN' AS DOUBLE)]);
+----
+-1379520635868705102
+
+query I
+SELECT xxhash64([-CAST('NaN' AS FLOAT)]);
+----
+2692338816207849720
+
+# Spark requires at least one argument
+statement error does not support zero arguments
+SELECT xxhash64();
