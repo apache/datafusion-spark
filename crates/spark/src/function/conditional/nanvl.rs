@@ -2,12 +2,12 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
-use arrow::array::{Array, ArrayRef, AsArray, BooleanArray};
-use arrow::compute::kernels::cast::{CastOptions, cast_with_options};
+use arrow::array::{ArrayRef, AsArray, BooleanArray};
 use arrow::compute::kernels::zip::zip;
-use arrow::datatypes::{DataType, Float32Type, Float64Type};
+use arrow::datatypes::{ArrowPrimitiveType, DataType, Float32Type, Float64Type};
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, exec_err, plan_err};
+use datafusion_expr::expr::{Cast, TryCast};
 use datafusion_expr::expr_fn::when;
 use datafusion_expr::simplify::{ExprSimplifyResult, SimplifyContext};
 use datafusion_expr::{
@@ -93,23 +93,19 @@ impl ScalarUDFImpl for SparkNanvl {
             }
         }
 
-        let is_string = |t: &DataType| {
-            matches!(t, DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View)
-        };
-
-        if is_string(t1) || is_string(t2) {
+        if is_string_type(t1) || is_string_type(t2) {
             // A STRING argument's numeric parse can fail at runtime, and
             // whether that failure is NULL (legacy) or an error (ANSI)
             // depends on `enable_ansi_mode`. Letting the analyzer insert
             // its own implicit Cast here would always use a strict cast
             // regardless of ANSI mode, so a STRING argument is left as-is
-            // and cast manually, ANSI-aware, in `invoke_with_args`. Spark
+            // here and cast manually, ANSI-aware, in `simplify()`. Spark
             // resolves a STRING argument against DOUBLE, never FLOAT, so
             // the other side is coerced to DOUBLE too (a numeric -> DOUBLE
             // cast never fails, so the analyzer can still insert that one
             // safely).
             let resolve = |t: &DataType| {
-                if is_string(t) {
+                if is_string_type(t) {
                     t.clone()
                 } else {
                     DataType::Float64
@@ -137,13 +133,12 @@ impl ScalarUDFImpl for SparkNanvl {
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         let [t1, _t2] = take_function_args("nanvl", arg_types)?;
-        match t1 {
+        if is_string_type(t1) {
             // A STRING argument stays unresolved through coerce_types (see
             // above), but it always produces a DOUBLE result.
-            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
-                Ok(DataType::Float64)
-            }
-            other => Ok(other.clone()),
+            Ok(DataType::Float64)
+        } else {
+            Ok(t1.clone())
         }
     }
 
@@ -159,38 +154,48 @@ impl ScalarUDFImpl for SparkNanvl {
         let [expr1, expr2] = take_function_args("nanvl", args)?;
 
         // A volatile expr1 (e.g. `rand()`) must be evaluated exactly once.
-        // The CASE rewrite below references expr1 twice — once in the
-        // condition and once in the ELSE branch — which would evaluate it
+        // The CASE rewrite below references expr1 twice - once in the
+        // condition and once in the ELSE branch - which would evaluate it
         // separately in each place. Skip the rewrite for volatile input and
         // fall back to `invoke_with_args`, which evaluates each argument
         // array exactly once.
+        //
+        // Note this fallback also makes expr2 eager (invoke_with_args
+        // evaluates both arguments up front), so e.g.
+        // `nanvl(random(), 1 / 0)` under ANSI mode raises here even though
+        // Spark would not, since Spark only evaluates `1 / 0` on rows where
+        // `random()` is NaN (which never happens). Accepted as an edge
+        // case: a volatile expr1 paired with a fallible expr2 is unusual.
         if expr1.is_volatile() {
             return Ok(ExprSimplifyResult::Original(vec![expr1, expr2]));
         }
 
-        // A string argument is deliberately left unresolved by
-        // `coerce_types` (see its comment) so that `invoke_with_args` can
-        // apply an ANSI-aware manual cast instead of the analyzer's own
-        // strict one. That means a string argument's `DataType` here is
-        // still Utf8/LargeUtf8/Utf8View, not Float64 — and a `CASE`
-        // expression requires its THEN and ELSE branches to share a single
-        // type, so building one with a Utf8 branch and a Float64 branch
-        // fails during logical planning. Skip the rewrite in that case and
-        // let `invoke_with_args` handle it eagerly instead.
-        let is_string_expr = |e: &Expr| {
-            matches!(
-                e.get_type(info.schema()),
-                Ok(DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View)
-            )
+        // A STRING argument is left unresolved by `coerce_types` (see its
+        // comment) so it can be cast here instead of by the analyzer's own
+        // always-strict implicit Cast. Spark's semantics are ANSI-aware: a
+        // bad numeric string is NULL in legacy mode and an error under
+        // ANSI. Wrapping it in Cast/TryCast keeps that cast inside the
+        // expression tree, where DataFusion's CASE evaluates it lazily -
+        // a string expr2 is only cast (and can only fail) on rows where
+        // expr1 is actually NaN, matching Spark.
+        let enable_ansi_mode = info.config_options().execution.enable_ansi_mode;
+        let to_float64 = |e: Expr| -> Result<Expr> {
+            if !is_string_type(&e.get_type(info.schema())?) {
+                return Ok(e);
+            }
+            Ok(if enable_ansi_mode {
+                Expr::Cast(Cast::new(Box::new(e), DataType::Float64))
+            } else {
+                Expr::TryCast(TryCast::new(Box::new(e), DataType::Float64))
+            })
         };
-        if is_string_expr(&expr1) || is_string_expr(&expr2) {
-            return Ok(ExprSimplifyResult::Original(vec![expr1, expr2]));
-        }
+        let expr1 = to_float64(expr1)?;
+        let expr2 = to_float64(expr2)?;
 
         // Arrow/DataFusion comparison kernels use IEEE-754 totalOrder
         // semantics, under which NaN compares equal to itself, so
         // `expr1 != expr1` is never true for a NaN value coming from a
-        // column — it only appears to work for literal NaNs that the
+        // column - it only appears to work for literal NaNs that the
         // simplifier constant-folds ahead of time. Use `isnan` instead,
         // which inspects the actual bit pattern.
         let is_nan = isnan(expr1.clone());
@@ -198,31 +203,12 @@ impl ScalarUDFImpl for SparkNanvl {
         Ok(ExprSimplifyResult::Simplified(case_expr))
     }
 
-    // This eager path is used both for any Comet physical execution that
-    // bypasses the logical optimizer, and whenever either argument is a
-    // STRING (see `coerce_types`), since that case needs an ANSI-aware
-    // manual cast rather than the simplify() rewrite below.
+    // This eager path is used only for physical execution that bypasses
+    // the logical optimizer entirely (e.g. Comet). The normal DataFusion
+    // query engine always goes through `simplify()` above, which is also
+    // where STRING arguments are handled - this path does not support
+    // them.
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        let is_string_type = |dt: &DataType| {
-            matches!(
-                dt,
-                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-            )
-        };
-
-        if args.args.iter().any(|a| is_string_type(&a.data_type())) {
-            let cast_options = CastOptions {
-                safe: !args.config_options.execution.enable_ansi_mode,
-                ..Default::default()
-            };
-            let arrays = ColumnarValue::values_to_arrays(&args.args)?;
-            let casted: Vec<ArrayRef> = arrays
-                .iter()
-                .map(|a| Ok(cast_with_options(a, &DataType::Float64, &cast_options)?))
-                .collect::<Result<_>>()?;
-            return Ok(ColumnarValue::Array(spark_nanvl_f64(&casted)?));
-        }
-
         match args.args[0].data_type() {
             DataType::Float32 => {
                 make_scalar_function(spark_nanvl_f32, vec![])(&args.args)
@@ -262,34 +248,35 @@ fn is_nanvl_coercible(dt: &DataType) -> bool {
     )
 }
 
-fn spark_nanvl_f64(args: &[ArrayRef]) -> Result<ArrayRef> {
+fn is_string_type(dt: &DataType) -> bool {
+    matches!(
+        dt,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    )
+}
+
+/// Builds the boolean mask "is expr1 NaN" (never true for a null expr1,
+/// since a null must fall through to the ELSE branch unchanged) and
+/// selects `expr2` where it is true, `expr1` otherwise - vectorised via
+/// Arrow's `zip` kernel. Shared by the f32 and f64 entry points below so
+/// the actual selection logic exists exactly once.
+fn nanvl_generic<T: ArrowPrimitiveType>(
+    args: &[ArrayRef],
+    is_nan: impl Fn(T::Native) -> bool,
+) -> Result<ArrayRef> {
     let [expr1, expr2] = take_function_args("nanvl", args)?;
-    let expr1_prim = expr1.as_primitive::<Float64Type>();
-    let mask: BooleanArray = (0..expr1_prim.len())
-        .map(|i| !expr1_prim.is_null(i) && expr1_prim.value(i).is_nan())
+    let expr1_prim = expr1.as_primitive::<T>();
+    let mask: BooleanArray = expr1_prim
+        .iter()
+        .map(|opt| matches!(opt, Some(v) if is_nan(v)))
         .collect();
-    nanvl_from_mask(&mask, expr2, expr1)
+    Ok(zip(&mask, expr2, expr1)?)
+}
+
+fn spark_nanvl_f64(args: &[ArrayRef]) -> Result<ArrayRef> {
+    nanvl_generic::<Float64Type>(args, f64::is_nan)
 }
 
 fn spark_nanvl_f32(args: &[ArrayRef]) -> Result<ArrayRef> {
-    let [expr1, expr2] = take_function_args("nanvl", args)?;
-    let expr1_prim = expr1.as_primitive::<Float32Type>();
-    let mask: BooleanArray = (0..expr1_prim.len())
-        .map(|i| !expr1_prim.is_null(i) && expr1_prim.value(i).is_nan())
-        .collect();
-    nanvl_from_mask(&mask, expr2, expr1)
-}
-
-/// Selects `expr2` where `mask` ("is expr1 NaN", with no nulls of its own)
-/// is true, and `expr1` otherwise — vectorised via Arrow's `zip` kernel
-/// instead of a per-row loop. `expr1`'s own nulls flow through unchanged on
-/// the `false` branch, which is exactly what gives a NULL `expr1` priority
-/// over everything else; a NULL `expr2` only surfaces where the mask is
-/// actually true.
-fn nanvl_from_mask(
-    mask: &BooleanArray,
-    expr2: &ArrayRef,
-    expr1: &ArrayRef,
-) -> Result<ArrayRef> {
-    Ok(zip(mask, expr2, expr1)?)
+    nanvl_generic::<Float32Type>(args, f32::is_nan)
 }

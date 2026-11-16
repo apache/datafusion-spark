@@ -189,11 +189,7 @@ SELECT nanvl('123.5', 1.0::double);
 123.5
 
 ## An invalid numeric string in legacy mode (ANSI off) returns NULL from the
-## cast, not a planning error — this is the whole point of handling STRING
-## manually instead of letting the analyzer insert its own strict cast.
-statement ok
-SET datafusion.execution.enable_ansi_mode = false;
-
+## cast, not a planning error.
 query R
 SELECT nanvl('abc', 1.0::double);
 ----
@@ -205,6 +201,18 @@ SET datafusion.execution.enable_ansi_mode = true;
 
 statement error Cannot cast
 SELECT nanvl('abc', 1.0::double);
+
+## A string expr2 is only cast, and only matters, when expr1 is NaN - even
+## under ANSI mode, where an unconditional eager cast of an invalid string
+## would raise for every row. Spark 4.2.0 (ANSI on):
+## SELECT d, nanvl(d, s) FROM VALUES (1.0D,'abc'), (CAST('NaN' AS DOUBLE),'2')
+## t(d,s) gives (1.0, 1.0), (NaN, 2.0) - 'abc' is never parsed because its
+## row's expr1 is not NaN.
+query RR
+SELECT d, nanvl(d, s) FROM (VALUES (1.0::double, 'abc'), (CAST('NaN' AS DOUBLE), '2')) t(d, s);
+----
+1 1
+NaN 2
 
 statement ok
 SET datafusion.execution.enable_ansi_mode = false;
