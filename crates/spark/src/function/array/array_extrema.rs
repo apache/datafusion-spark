@@ -7,11 +7,16 @@
 use super::array_position::contains_map;
 use super::float_normalize::normalize_array;
 use arrow::array::{
-    Array, ArrayRef, AsArray, GenericListArray, OffsetSizeTrait, UInt64Array,
-    make_comparator, new_null_array,
+    Array, ArrayRef, ArrowPrimitiveType, AsArray, GenericListArray, OffsetSizeTrait,
+    PrimitiveArray, UInt64Array, make_comparator, new_null_array,
 };
 use arrow::compute::{SortOptions, take};
-use arrow::datatypes::{DataType, Field};
+use arrow::datatypes::{
+    DataType, Date32Type, Date64Type, Decimal128Type, Decimal256Type, Field, Float16Type,
+    Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, TimeUnit,
+    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+    TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+};
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, ScalarValue, exec_err, plan_err};
 use datafusion_expr::{
@@ -238,9 +243,69 @@ fn extrema<O: OffsetSizeTrait>(
     let base = offsets[0].as_usize();
     let len = offsets[offsets.len() - 1].as_usize() - base;
     let values = list.values().slice(base, len);
+
+    // Primitive elements take a typed path: no copy of the values, no type-erased comparator
+    // and no `take`.
+    macro_rules! primitive {
+        ($t:ty, $cmp:expr) => {
+            return Ok(Arc::new(primitive_extrema::<$t, O>(
+                list,
+                values.as_primitive::<$t>(),
+                base,
+                target,
+                $cmp,
+            )))
+        };
+    }
+    macro_rules! ordered {
+        ($t:ty) => {
+            primitive!($t, |a, b| a.cmp(&b))
+        };
+    }
+    match values.data_type() {
+        DataType::Int8 => ordered!(Int8Type),
+        DataType::Int16 => ordered!(Int16Type),
+        DataType::Int32 => ordered!(Int32Type),
+        DataType::Int64 => ordered!(Int64Type),
+        DataType::UInt8 => ordered!(UInt8Type),
+        DataType::UInt16 => ordered!(UInt16Type),
+        DataType::UInt32 => ordered!(UInt32Type),
+        DataType::UInt64 => ordered!(UInt64Type),
+        DataType::Decimal128(_, _) => ordered!(Decimal128Type),
+        DataType::Decimal256(_, _) => ordered!(Decimal256Type),
+        DataType::Date32 => ordered!(Date32Type),
+        DataType::Date64 => ordered!(Date64Type),
+        DataType::Timestamp(TimeUnit::Second, _) => ordered!(TimestampSecondType),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => {
+            ordered!(TimestampMillisecondType)
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            ordered!(TimestampMicrosecondType)
+        }
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+            ordered!(TimestampNanosecondType)
+        }
+        DataType::Float16 => primitive!(Float16Type, spark_float_cmp),
+        DataType::Float32 => primitive!(Float32Type, spark_float_cmp),
+        DataType::Float64 => primitive!(Float64Type, spark_float_cmp),
+        _ => {}
+    }
+
+    generic_extrema(list, &values, base, target)
+}
+
+/// [`extrema`] for any orderable element type. `values` is the list's values sliced to
+/// start at offset `base`.
+fn generic_extrema<O: OffsetSizeTrait>(
+    list: &GenericListArray<O>,
+    values: &ArrayRef,
+    base: usize,
+    target: Ordering,
+) -> Result<ArrayRef> {
+    let offsets = list.offsets();
     // Compare canonicalized floats, so that NaN is the greatest value and -0.0 equals 0.0 at
     // any depth, but return the original element.
-    let normalized = normalize_array(&values)?;
+    let normalized = normalize_array(values)?;
     // Spark orders NULLs nested inside arrays and structs before other values.
     let cmp = make_comparator(
         normalized.as_ref(),
@@ -264,6 +329,55 @@ fn extrema<O: OffsetSizeTrait>(
         .collect();
 
     Ok(take(values.as_ref(), &indices, None)?)
+}
+
+/// Spark's float ordering: NaN is equal to NaN and greater than every other value, and
+/// -0.0 is equal to 0.0 (as under `partial_cmp`).
+fn spark_float_cmp<F: PartialOrd>(a: F, b: F) -> Ordering {
+    // `partial_cmp` fails only when a NaN is involved; `x != x` holds only for NaN.
+    #[expect(clippy::eq_op)]
+    a.partial_cmp(&b).unwrap_or_else(|| (a != a).cmp(&(b != b)))
+}
+
+/// [`extrema`] for primitive elements. `values` is the list's values sliced to start at
+/// offset `base`. The winning value is copied unchanged, so the sign of a zero and the bits
+/// of a NaN are kept, and the result keeps the element type's precision, scale or time zone.
+fn primitive_extrema<T, O>(
+    list: &GenericListArray<O>,
+    values: &PrimitiveArray<T>,
+    base: usize,
+    target: Ordering,
+    cmp: impl Fn(T::Native, T::Native) -> Ordering,
+) -> PrimitiveArray<T>
+where
+    T: ArrowPrimitiveType,
+    O: OffsetSizeTrait,
+{
+    let raw = values.values();
+    let result: PrimitiveArray<T> = list
+        .offsets()
+        .windows(2)
+        .enumerate()
+        .map(|(row, w)| {
+            if list.is_null(row) {
+                return None;
+            }
+            let (start, end) = (w[0].as_usize() - base, w[1].as_usize() - base);
+            let mut best: Option<T::Native> = None;
+            for i in start..end {
+                if values.is_null(i) {
+                    continue;
+                }
+                let v = raw[i];
+                best = match best {
+                    Some(b) if cmp(v, b) != target => Some(b),
+                    _ => Some(v),
+                };
+            }
+            best
+        })
+        .collect();
+    result.with_data_type(values.data_type().clone())
 }
 
 #[cfg(test)]
@@ -570,5 +684,97 @@ mod tests {
             udf.coerce_types(&[fixed]).unwrap(),
             vec![DataType::new_list(DataType::Int32, true)]
         );
+    }
+
+    /// Runs the typed path (through the UDF) and the generic path on the same input and
+    /// checks that they pick bit-identical values.
+    fn assert_paths_agree(input: &ListArray) {
+        let values = {
+            let offsets = input.offsets();
+            let base = offsets[0] as usize;
+            let len = offsets[offsets.len() - 1] as usize - base;
+            (base, input.values().slice(base, len))
+        };
+        for (udf, target) in [
+            (
+                &SparkArrayMax::new() as &dyn ScalarUDFImpl,
+                Ordering::Greater,
+            ),
+            (&SparkArrayMin::new(), Ordering::Less),
+        ] {
+            let fast = run_array(udf, input);
+            let generic = generic_extrema(input, &values.1, values.0, target).unwrap();
+            assert_eq!(f64_bits(&fast), f64_bits(&generic), "{}", udf.name());
+        }
+    }
+
+    #[test]
+    fn typed_float_path_matches_generic_path() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let specials = [
+            f64::NAN,
+            -f64::NAN,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN_POSITIVE,
+            1.0,
+            -1.0,
+        ];
+        let rng = &mut StdRng::seed_from_u64(7);
+        let rows: Vec<Option<Vec<Option<f64>>>> = (0..2000)
+            .map(|_| {
+                (rng.random_range(0..10) != 0).then(|| {
+                    (0..rng.random_range(0..8))
+                        .map(|_| {
+                            (rng.random_range(0..5) != 0)
+                                .then(|| specials[rng.random_range(0..specials.len())])
+                        })
+                        .collect()
+                })
+            })
+            .collect();
+        let input = ListArray::from_iter_primitive::<Float64Type, _, _>(rows);
+        assert_paths_agree(&input);
+        assert_paths_agree(&input.slice(13, 1500));
+    }
+
+    #[test]
+    fn typed_path_keeps_element_type() {
+        use arrow::array::{Decimal128Array, TimestampMicrosecondArray};
+        let decimal_type = DataType::Decimal128(20, 3);
+        let decimals: ArrayRef = Arc::new(
+            Decimal128Array::from(vec![Some(1_500), None, Some(-2_000), Some(1_499)])
+                .with_data_type(decimal_type.clone()),
+        );
+        let timestamp_type =
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()));
+        let timestamps: ArrayRef = Arc::new(
+            TimestampMicrosecondArray::from(vec![Some(5), Some(9), None, Some(1)])
+                .with_data_type(timestamp_type.clone()),
+        );
+        for values in [decimals, timestamps] {
+            let data_type = values.data_type().clone();
+            let input = ListArray::new(
+                Arc::new(Field::new_list_field(data_type.clone(), true)),
+                OffsetBuffer::from_lengths([4]),
+                values,
+                None,
+            );
+            let (max, min) = (max(&input), min(&input));
+            assert_eq!(max.data_type(), &data_type);
+            assert_eq!(min.data_type(), &data_type);
+            if data_type == decimal_type {
+                assert_eq!(max.as_primitive::<Decimal128Type>().value(0), 1_500);
+                assert_eq!(min.as_primitive::<Decimal128Type>().value(0), -2_000);
+            } else {
+                assert_eq!(data_type, timestamp_type);
+                assert_eq!(max.as_primitive::<TimestampMicrosecondType>().value(0), 9);
+                assert_eq!(min.as_primitive::<TimestampMicrosecondType>().value(0), 1);
+            }
+        }
     }
 }
