@@ -22,22 +22,23 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, AsArray};
 use arrow::compute::{CastOptions, cast_with_options};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Int64Type, TimeUnit, TimestampMicrosecondType};
+use arrow::temporal_conversions::MICROSECONDS;
 use arrow::util::display::FormatOptions;
-use datafusion_common::{Result, ScalarValue, internal_err, not_impl_err};
+use datafusion_common::{
+    Result, ScalarValue, exec_datafusion_err, internal_err, not_impl_err,
+};
 use datafusion_expr::ColumnarValue;
 
-use crate::EvalMode;
-use crate::function::timezone_utils::{
-    array_with_timezone, cast_timestamp_to_ntz, timestamp_ntz_to_timestamp,
-};
-use utils::spark_cast_postprocess;
+use crate::function::timezone_utils::{local_to_timestamp, timestamp_to_local};
+use crate::{EvalMode, SparkTimeZone};
+use utils::remove_trailing_zeroes;
 
 pub use udf::SparkCast;
 
 /// The format Spark uses for a timestamp cast to a string. `%.f` writes the
-/// fraction of a second only when it is not zero, and
-/// [`spark_cast_postprocess`] then drops its trailing zeros.
+/// fraction of a second only when it is not zero, padded to 3, 6 or 9 digits,
+/// and [`remove_trailing_zeroes`] then drops the padding.
 const TIMESTAMP_FORMAT: Option<&str> = Some("%Y-%m-%d %H:%M:%S%.f");
 
 /// Options for [`spark_cast`].
@@ -49,24 +50,32 @@ const TIMESTAMP_FORMAT: Option<&str> = Some("%Y-%m-%d %H:%M:%S%.f");
 pub struct SparkCastOptions {
     /// How a value that cannot be cast is handled.
     pub eval_mode: EvalMode,
-    /// The session time zone (`spark.sql.session.timeZone`), as an IANA name
-    /// such as `America/New_York` or an offset such as `+05:00`. Casts between
-    /// `TIMESTAMP` and `TIMESTAMP_NTZ`, `STRING` or `DATE` need it. It is empty
-    /// when the caller has no time zone, and those casts then return an error.
-    pub timezone: String,
+    /// The session time zone (`spark.sql.session.timeZone`). A cast from
+    /// `TIMESTAMP` to `TIMESTAMP_NTZ`, `STRING` or `DATE`, or from
+    /// `TIMESTAMP_NTZ` to `TIMESTAMP`, returns an error without one.
+    pub timezone: Option<SparkTimeZone>,
 }
 
 impl SparkCastOptions {
-    pub fn new(eval_mode: EvalMode, timezone: &str) -> Self {
+    /// Options with no session time zone.
+    pub fn new(eval_mode: EvalMode) -> Self {
         Self {
             eval_mode,
-            timezone: timezone.to_string(),
+            timezone: None,
         }
     }
 
-    /// Options for a cast that does not involve a time zone.
-    pub fn new_without_timezone(eval_mode: EvalMode) -> Self {
-        Self::new(eval_mode, "")
+    pub fn with_timezone(self, timezone: SparkTimeZone) -> Self {
+        Self {
+            timezone: Some(timezone),
+            ..self
+        }
+    }
+
+    fn session_timezone(&self) -> Result<&SparkTimeZone> {
+        self.timezone.as_ref().ok_or_else(|| {
+            exec_datafusion_err!("Casting a timestamp requires a session time zone")
+        })
     }
 }
 
@@ -101,7 +110,8 @@ pub(crate) fn cast_array(
     cast_options: &SparkCastOptions,
 ) -> Result<ArrayRef> {
     use DataType::*;
-    let from_type = array.data_type().clone();
+    use EvalMode::*;
+    let from_type = array.data_type();
 
     // Spark's SQL type grammar cannot express a dictionary as a cast target:
     // https://github.com/apache/spark/blob/v4.2.0/sql/api/src/main/antlr4/org/apache/spark/sql/catalyst/parser/SqlBaseParser.g4#L1477-L1525
@@ -109,108 +119,127 @@ pub(crate) fn cast_array(
         return internal_err!("Spark cannot specify dictionary types as cast targets");
     }
 
-    if &from_type == to_type {
+    if from_type == to_type {
         return Ok(array);
     }
 
-    let array = array_with_timezone(array, cast_options.timezone.clone(), Some(to_type))?;
-    let eval_mode = cast_options.eval_mode;
+    // Spark's TIMESTAMP and TIMESTAMP_NTZ are microseconds since the epoch, and
+    // the timestamp casts below assume that unit.
+    let is_other_timestamp_unit =
+        |t: &DataType| matches!(t, Timestamp(unit, _) if *unit != TimeUnit::Microsecond);
+    if is_other_timestamp_unit(from_type) || is_other_timestamp_unit(to_type) {
+        return not_supported(from_type, to_type);
+    }
 
+    let eval_mode = cast_options.eval_mode;
     let native_cast_options = CastOptions {
         // Arrow returns NULL for a value it cannot cast when `safe` is set, and
         // an error otherwise.
-        safe: eval_mode != EvalMode::Ansi,
-        format_options: FormatOptions::new()
-            .with_timestamp_tz_format(TIMESTAMP_FORMAT)
-            .with_timestamp_format(TIMESTAMP_FORMAT),
+        safe: eval_mode != Ansi,
+        format_options: FormatOptions::new().with_timestamp_format(TIMESTAMP_FORMAT),
     };
+    let arrow_cast =
+        |array: &dyn Array| Ok(cast_with_options(array, to_type, &native_cast_options)?);
 
     // Engines such as Comet can read a string or binary Parquet column as a
     // dictionary, although Spark sees its value type. Cast the dictionary values
     // and unpack the result.
-    if let Dictionary(_, value_type) = &from_type
+    //
+    // TODO: this casts values that no row refers to, so once a cast from string
+    // can fail, ANSI mode could raise an error that Spark would not.
+    if let Dictionary(_, value_type) = from_type
         && matches!(value_type.as_ref(), Utf8 | LargeUtf8 | Binary | LargeBinary)
     {
         let dictionary = array.as_any_dictionary();
         let values = cast_array(Arc::clone(dictionary.values()), to_type, cast_options)?;
-        let dictionary = dictionary.with_values(values);
-        let unpacked = cast_with_options(&dictionary, to_type, &native_cast_options)?;
-        return spark_cast_postprocess(unpacked, &from_type, to_type);
+        return arrow_cast(&dictionary.with_values(values));
     }
 
-    let result = match (&from_type, to_type) {
+    match (from_type, to_type) {
         // A NULL array has no values, so Arrow's cast only changes the type.
-        (Null, _) => cast_with_options(&array, to_type, &native_cast_options)?,
-        // `array_with_timezone` has already converted the local date-times to
-        // UTC. This arm must come before the Arrow fallthrough, which would copy
-        // the values without converting them.
-        (Timestamp(_, None), Timestamp(_, Some(target_tz))) => {
-            timestamp_ntz_to_timestamp(
-                array,
-                &cast_options.timezone,
-                Some(target_tz.as_ref()),
-            )?
-        }
-        (Timestamp(_, Some(_)), Timestamp(_, None)) => {
-            cast_timestamp_to_ntz(array, &cast_options.timezone)?
-        }
-        _ if is_pending_port(&from_type, to_type, eval_mode) => {
-            return not_impl_err!(
-                "Spark-compatible cast from {from_type} to {to_type} in {eval_mode:?} mode \
-                 is not implemented yet"
-            );
-        }
-        _ if is_datafusion_spark_compatible(&from_type, to_type) => {
-            cast_with_options(&array, to_type, &native_cast_options)?
-        }
-        _ => {
-            return not_impl_err!(
-                "Spark-compatible cast from {from_type} to {to_type} is not supported"
-            );
-        }
-    };
+        (Null, _) => arrow_cast(&array),
 
-    spark_cast_postprocess(result, &from_type, to_type)
+        // Timestamps. Arrow's casts ignore the session time zone.
+        (Timestamp(_, Some(_)), Int64) => {
+            // Spark returns whole seconds, rounded down.
+            let micros = array.as_primitive::<TimestampMicrosecondType>();
+            Ok(Arc::new(
+                micros.unary::<_, Int64Type>(|v| v.div_euclid(MICROSECONDS)),
+            ))
+        }
+        (Timestamp(_, Some(_)), Utf8 | Date32 | Timestamp(_, None)) => {
+            let local = timestamp_to_local(
+                array.as_primitive(),
+                cast_options.session_timezone()?,
+            )?;
+            match to_type {
+                Utf8 => Ok(remove_trailing_zeroes(&arrow_cast(&local)?)),
+                Date32 => arrow_cast(&local),
+                _ => Ok(Arc::new(local)),
+            }
+        }
+        (Timestamp(_, None), Utf8) => Ok(remove_trailing_zeroes(&arrow_cast(&array)?)),
+        (Timestamp(_, None), Timestamp(_, Some(target_tz))) => {
+            let utc = local_to_timestamp(
+                array.as_primitive(),
+                cast_options.session_timezone()?,
+            )?;
+            Ok(Arc::new(utc.with_timezone(Arc::clone(target_tz))))
+        }
+
+        // Casts that Arrow supports, but where Spark's result differs, and that
+        // have not been ported from Comet yet. Each is replaced by its
+        // implementation as its family is ported.
+        //
+        // LEGACY wraps on overflow and ANSI raises CAST_OVERFLOW, while Arrow
+        // returns NULL. TRY matches Arrow.
+        (Int64, Int32 | Int16 | Int8) | (Int32, Int16 | Int8) | (Int16, Int8)
+            if eval_mode != Try =>
+        {
+            not_yet_ported(from_type, to_type, eval_mode)
+        }
+        (Float32 | Float64 | Decimal128(_, _), Int8 | Int16 | Int32 | Int64)
+            if eval_mode != Try =>
+        {
+            not_yet_ported(from_type, to_type, eval_mode)
+        }
+        // ANSI raises NUMERIC_VALUE_OUT_OF_RANGE, with Spark's message.
+        (Decimal128(_, _), Decimal128(_, _)) if eval_mode == Ansi => {
+            not_yet_ported(from_type, to_type, eval_mode)
+        }
+        // LEGACY uses Java's BigDecimal.toString, as in "0E-18".
+        (Decimal128(_, _), Utf8) if eval_mode == Legacy => {
+            not_yet_ported(from_type, to_type, eval_mode)
+        }
+        // Spark replaces invalid UTF-8, and Arrow raises an error.
+        (Binary, Utf8) => not_yet_ported(from_type, to_type, eval_mode),
+
+        _ if is_datafusion_spark_compatible(from_type, to_type) => arrow_cast(&array),
+        _ => not_supported(from_type, to_type),
+    }
 }
 
-/// Whether Spark's result for the cast differs from Arrow's, although
-/// [`is_datafusion_spark_compatible`] accepts it, and the Spark-compatible
-/// implementation has not been ported from Comet yet. Each family removes its
-/// cases from here as it is ported.
-fn is_pending_port(
+fn not_supported(from_type: &DataType, to_type: &DataType) -> Result<ArrayRef> {
+    not_impl_err!("Spark-compatible cast from {from_type} to {to_type} is not supported")
+}
+
+fn not_yet_ported(
     from_type: &DataType,
     to_type: &DataType,
     eval_mode: EvalMode,
-) -> bool {
-    use DataType::*;
-    match (from_type, to_type) {
-        // LEGACY wraps on overflow and ANSI raises CAST_OVERFLOW, while Arrow
-        // returns NULL. TRY matches Arrow.
-        (Int64, Int32 | Int16 | Int8) | (Int32, Int16 | Int8) | (Int16, Int8) => {
-            eval_mode != EvalMode::Try
-        }
-        (Float32 | Float64 | Decimal128(_, _), Int8 | Int16 | Int32 | Int64) => {
-            eval_mode != EvalMode::Try
-        }
-        // ANSI raises NUMERIC_VALUE_OUT_OF_RANGE, with Spark's message.
-        (Decimal128(_, _), Decimal128(_, _)) => eval_mode == EvalMode::Ansi,
-        // LEGACY uses Java's BigDecimal.toString, as in "0E-18".
-        (Decimal128(_, _), Utf8) => eval_mode == EvalMode::Legacy,
-        // Spark replaces invalid UTF-8, and Arrow raises an error.
-        (Binary, Utf8) => true,
-        _ => false,
-    }
+) -> Result<ArrayRef> {
+    not_impl_err!(
+        "Spark-compatible cast from {from_type} to {to_type} in {eval_mode:?} mode is \
+         not implemented yet"
+    )
 }
 
-/// Whether Arrow's cast from `from_type` to `to_type` matches Spark's, for every
-/// eval mode, once [`spark_cast_postprocess`] has run.
+/// Whether Arrow's cast from `from_type` to `to_type` matches Spark's in every
+/// eval mode. [`cast_array`] handles the casts it needs to before consulting
+/// this.
 fn is_datafusion_spark_compatible(from_type: &DataType, to_type: &DataType) -> bool {
     use DataType::*;
-    if from_type == to_type {
-        return true;
-    }
     match from_type {
-        Null => matches!(to_type, List(_)),
         Boolean => matches!(
             to_type,
             Int8 | Int16 | Int32 | Int64 | Float32 | Float64 | Utf8
@@ -234,8 +263,9 @@ fn is_datafusion_spark_compatible(from_type: &DataType, to_type: &DataType) -> b
         Utf8 => matches!(to_type, Binary),
         // Arrow reinterprets the days since the epoch, as Spark does.
         Date32 => matches!(to_type, Int32 | Utf8),
-        Timestamp(_, _) => matches!(to_type, Int64 | Date32 | Utf8 | Timestamp(_, _)),
-        Binary => matches!(to_type, Utf8),
+        // The instant is unchanged, so Arrow only replaces the time zone.
+        Timestamp(_, Some(_)) => matches!(to_type, Timestamp(_, Some(_))),
+        Timestamp(_, None) => matches!(to_type, Date32),
         _ => false,
     }
 }
@@ -243,15 +273,21 @@ fn is_datafusion_spark_compatible(from_type: &DataType, to_type: &DataType) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::TimestampMillisecondArray;
     use arrow::array::{
         BinaryArray, DictionaryArray, Int32Array, Int64Array, NullArray, StringArray,
         TimestampMicrosecondArray,
     };
-    use arrow::datatypes::{Field, Int32Type, Int64Type, TimeUnit};
+    use arrow::datatypes::{Field, Int32Type, Int64Type};
     use datafusion_common::DataFusionError;
 
+    fn options(eval_mode: EvalMode, timezone: &str) -> SparkCastOptions {
+        SparkCastOptions::new(eval_mode)
+            .with_timezone(SparkTimeZone::parse(timezone).unwrap())
+    }
+
     fn legacy() -> SparkCastOptions {
-        SparkCastOptions::new(EvalMode::Legacy, "UTC")
+        options(EvalMode::Legacy, "UTC")
     }
 
     fn timestamp(tz: Option<&str>) -> DataType {
@@ -310,7 +346,7 @@ mod tests {
             let error = cast_array(
                 Arc::clone(&array),
                 &DataType::Int32,
-                &SparkCastOptions::new_without_timezone(eval_mode),
+                &SparkCastOptions::new(eval_mode),
             )
             .unwrap_err();
             assert!(
@@ -324,7 +360,7 @@ mod tests {
         let result = cast_array(
             array,
             &DataType::Int32,
-            &SparkCastOptions::new_without_timezone(EvalMode::Try),
+            &SparkCastOptions::new(EvalMode::Try),
         )
         .unwrap();
         assert!(result.is_null(0));
@@ -337,7 +373,7 @@ mod tests {
             let result = cast_array(
                 Arc::new(Int32Array::from(vec![Some(-1), None])),
                 &DataType::Int64,
-                &SparkCastOptions::new_without_timezone(eval_mode),
+                &SparkCastOptions::new(eval_mode),
             )
             .unwrap();
             assert_eq!(
@@ -415,7 +451,7 @@ mod tests {
             TimestampMicrosecondArray::from(vec![Some(1_705_332_600_100_000), None])
                 .with_timezone("UTC"),
         );
-        let options = SparkCastOptions::new(EvalMode::Legacy, "America/New_York");
+        let options = options(EvalMode::Legacy, "America/New_York");
         let result = cast_array(array, &DataType::Utf8, &options).unwrap();
         assert_eq!(
             result.as_string::<i32>(),
@@ -424,11 +460,29 @@ mod tests {
     }
 
     #[test]
+    fn test_cast_timestamp_to_date_in_session_timezone() {
+        // 2024-01-15 03:00:00 UTC is still 2024-01-14 in Los Angeles.
+        let array: ArrayRef = Arc::new(
+            TimestampMicrosecondArray::from(vec![1_705_287_600_000_000])
+                .with_timezone("UTC"),
+        );
+        let result =
+            cast_array(array, &DataType::Date32, &options(EvalMode::Legacy, "PST"))
+                .unwrap();
+        assert_eq!(
+            result
+                .as_primitive::<arrow::datatypes::Date32Type>()
+                .value(0),
+            19_736
+        );
+    }
+
+    #[test]
     fn test_cast_between_timestamp_and_timestamp_ntz() {
         // 2024-01-15 15:30:00 UTC is 10:30:00 in New York.
         let utc_micros = 1_705_332_600_000_000;
         let local_micros = 1_705_314_600_000_000;
-        let options = SparkCastOptions::new(EvalMode::Legacy, "America/New_York");
+        let options = options(EvalMode::Legacy, "America/New_York");
 
         let ltz: ArrayRef = Arc::new(
             TimestampMicrosecondArray::from(vec![utc_micros]).with_timezone("UTC"),
@@ -436,17 +490,33 @@ mod tests {
         let ntz = cast_array(ltz, &timestamp(None), &options).unwrap();
         assert_eq!(ntz.data_type(), &timestamp(None));
         assert_eq!(
-            ntz.as_primitive::<arrow::datatypes::TimestampMicrosecondType>()
-                .value(0),
+            ntz.as_primitive::<TimestampMicrosecondType>().value(0),
             local_micros
         );
 
         let ltz = cast_array(ntz, &timestamp(Some("UTC")), &options).unwrap();
         assert_eq!(ltz.data_type(), &timestamp(Some("UTC")));
         assert_eq!(
-            ltz.as_primitive::<arrow::datatypes::TimestampMicrosecondType>()
-                .value(0),
+            ltz.as_primitive::<TimestampMicrosecondType>().value(0),
             utc_micros
+        );
+    }
+
+    #[test]
+    fn test_cast_timestamp_in_other_units_is_unsupported() {
+        let millis: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![1_500]));
+        let error = cast_array(millis, &DataType::Int64, &legacy()).unwrap_err();
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "{error}"
+        );
+
+        let micros: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![0]));
+        let nanos = DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()));
+        let error = cast_array(micros, &nanos, &legacy()).unwrap_err();
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "{error}"
         );
     }
 
@@ -454,27 +524,41 @@ mod tests {
     fn test_cast_timestamp_without_timezone_is_an_error() {
         let array: ArrayRef =
             Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC"));
-        let options = SparkCastOptions::new_without_timezone(EvalMode::Legacy);
+        let options = SparkCastOptions::new(EvalMode::Legacy);
         let error = cast_array(array, &DataType::Utf8, &options).unwrap_err();
-        assert!(error.to_string().contains("requires a timezone"), "{error}");
+        assert!(
+            error.to_string().contains("requires a session time zone"),
+            "{error}"
+        );
     }
 
     #[test]
-    fn test_cast_invalid_timezone() {
-        let array: ArrayRef =
-            Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC"));
-        let options = SparkCastOptions::new(EvalMode::Legacy, "Not a valid timezone");
-        assert!(cast_array(array, &DataType::Date32, &options).is_err());
+    fn test_cast_timestamp_ntz() {
+        // 2024-01-15 10:30:00.5 local time
+        let ntz: ArrayRef =
+            Arc::new(TimestampMicrosecondArray::from(vec![1_705_314_600_500_000]));
+        // A local date-time renders without the session time zone.
+        let options = SparkCastOptions::new(EvalMode::Legacy);
+        let result = cast_array(Arc::clone(&ntz), &DataType::Utf8, &options).unwrap();
+        assert_eq!(
+            result.as_string::<i32>(),
+            &StringArray::from(vec!["2024-01-15 10:30:00.5"])
+        );
+        let error = cast_array(ntz, &DataType::Int64, &legacy()).unwrap_err();
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "{error}"
+        );
     }
 
     #[test]
     fn test_cast_unsupported_timestamp_to_date() {
         // chrono cannot represent every value of a microsecond timestamp.
         let array: ArrayRef = Arc::new(
-            TimestampMicrosecondArray::from(vec![i64::MAX])
-                .with_timezone("Europe/Copenhagen"),
+            TimestampMicrosecondArray::from(vec![i64::MAX]).with_timezone("UTC"),
         );
-        assert!(cast_array(array, &DataType::Date32, &legacy()).is_err());
+        let options = options(EvalMode::Legacy, "Europe/Copenhagen");
+        assert!(cast_array(array, &DataType::Date32, &options).is_err());
     }
 
     #[test]

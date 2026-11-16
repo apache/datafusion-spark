@@ -122,6 +122,7 @@ pub mod planner;
 
 pub use error::SparkError;
 pub use eval_mode::EvalMode;
+pub use function::datetime::timezone::SparkTimeZone;
 
 #[cfg(feature = "core")]
 mod session_state;
