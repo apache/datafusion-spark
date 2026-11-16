@@ -25,6 +25,7 @@ differs from the DataFusion built-in of the same name, if there is one.
 - [bit_count](#bit_count)
 - [bit_get](#bit_get)
 - [bitwise_not](#bitwise_not)
+- [bround](#bround)
 - [ceil](#ceil)
 - [ceiling](#ceiling)
 - [csc](#csc)
@@ -35,6 +36,7 @@ differs from the DataFusion built-in of the same name, if there is one.
 - [hex](#hex)
 - [hypot](#hypot)
 - [negative](#negative)
+- [positive](#positive)
 - [pow](#pow)
 - [power](#power)
 - [rint](#rint)
@@ -71,7 +73,7 @@ abs(expr)
 
 #### `atan2`
 
-Returns the angle in radians, between -pi and pi, between the positive x-axis and the point (`exprX`, `exprY`). Note that the y coordinate comes first. Both arguments are cast to DOUBLE and the result is a DOUBLE. Returns NULL if either input is NULL, and NaN if either input is NaN (and neither is NULL). Infinite inputs and signed zeros follow `java.lang.Math.atan2`: for example `atan2(-0.0, -1.0)` is -pi.
+Returns the angle in radians, between -pi and pi, between the positive x-axis and the point (`exprX`, `exprY`). Note that the y coordinate comes first. Both arguments are cast to DOUBLE and the result is a DOUBLE. Returns NULL if either input is NULL, and NaN if either input is NaN (and neither is NULL). Infinite inputs follow `java.lang.Math.atan2`, but both arguments have `0.0` added first (as in Spark), treating `-0.0` as `0.0`: for example `atan2(-0.0, -1.0)` is pi.
 
 ```sql
 atan2(exprY, exprX)
@@ -90,7 +92,7 @@ atan2(exprY, exprX)
 > SELECT atan2(0, -1);
 3.141592653589793
 > SELECT atan2(-0.0::double, -1.0::double);
--3.141592653589793
+3.141592653589793
 ```
 
 #### `bin`
@@ -194,6 +196,28 @@ bitwise_not(expr)
 2
 > SELECT bitwise_not(2147483647::int);
 -2147483648
+```
+
+#### `bround`
+
+Rounds `expr` to `d` decimal places using HALF_EVEN rounding: a tie goes to the even neighbour (2.5 becomes 2, 3.5 becomes 4). A negative `d` rounds to the left of the decimal point. Integers and floating-point values keep their type, and a string is cast to DOUBLE (a malformed string is NULL with `datafusion.execution.enable_ansi_mode` off and an error with it on). A decimal `DECIMAL(p, s)` returns `DECIMAL(min(p - s + 1 + min(s, d), 38), min(s, d))` for `d >= 0` and `DECIMAL(min(max(p - s + 1, 1 - d), 38), 0)` for `d < 0`, like Spark. Floating-point values are rounded from their shortest decimal representation, so `bround(2.675, 2)` is 2.68. Integer overflow wraps with ANSI mode off and fails with it on. Infinity and NaN are returned unchanged. Returns NULL if `expr` or `d` is NULL.
+
+```sql
+bround(expr[, d])
+```
+
+##### Arguments
+
+- **expr**: Numeric or string expression. NULL returns NULL.
+- **d**: Optional constant integer number of decimal places. Defaults to 0. NULL returns NULL.
+
+##### Example
+
+```sql
+> SELECT bround(2.5, 0);
+2
+> SELECT bround(25, -1);
+20
 ```
 
 #### `ceil`
@@ -391,6 +415,27 @@ negative(expr)
 99.99
 > SELECT negative((-2147483648)::INT);
 -2147483648
+```
+
+#### `positive`
+
+Returns `expr` unchanged. Accepts integer, floating-point, decimal and interval values. A string is cast to DOUBLE: a malformed string returns NULL with `datafusion.execution.enable_ansi_mode` off and fails with it on. Unlike Spark, a string with a type suffix or a hex float (`'1.5d'`, `'0x1p3'`) is malformed. Returns NULL if the input is NULL.
+
+```sql
+positive(expr)
+```
+
+##### Arguments
+
+- **expr**: Numeric, interval or string expression. NULL returns NULL.
+
+##### Example
+
+```sql
+> SELECT positive(1);
+1
+> SELECT positive('-1.11');
+-1.11
 ```
 
 #### `pow`
@@ -1137,7 +1182,7 @@ U3BhcmsgUw==
 
 #### `encode`
 
-Encodes a string into binary using a character set. Unlike DataFusion's `encode`, which takes `base64` or `hex` and returns a string, this takes a character set and returns binary. Supported character sets are `US-ASCII`, `ISO-8859-1`, `UTF-8`, `UTF-16`, `UTF-16BE`, `UTF-16LE`, `UTF-32`, `UTF-32BE` and `UTF-32LE`, matched case-insensitively, and the aliases `ASCII`, `LATIN1`, `ISO88591` and the spellings without a hyphen (`UTF8`, `UTF16BE`, ...). Any other character set is an error. `UTF-16` writes a big-endian byte order mark first. `UTF-32` is big-endian with no byte order mark. Characters the character set cannot represent (non-ASCII in `US-ASCII`, code points above U+00FF in `ISO-8859-1`) are replaced with `?`. Binary input is decoded as UTF-8 first, with each invalid byte replaced by U+FFFD. Returns NULL if either input is NULL. This follows Spark 3.5. Spark 4.0 rejects the aliases and raises an error on characters it cannot represent, unless `spark.sql.legacy.javaCharsets` and `spark.sql.legacy.codingErrorAction` are set; those settings are not supported yet.
+Encodes a string into binary using a character set. Unlike DataFusion's `encode`, which takes `base64` or `hex` and returns a string, this takes a character set and returns binary. Supported character sets are `US-ASCII`, `ISO-8859-1`, `UTF-8`, `UTF-16`, `UTF-16BE`, `UTF-16LE`, and `UTF-32`, matched case-insensitively. Any other character set raises `[INVALID_PARAMETER_VALUE.CHARSET]`. `UTF-16` writes a big-endian byte order mark first. `UTF-32` is big-endian with no byte order mark. Characters the character set cannot represent (non-ASCII in `US-ASCII`, code points above U+00FF in `ISO-8859-1`) raise `[MALFORMED_CHARACTER_CODING]`. Binary input is decoded as UTF-8 first, with each invalid byte replaced by U+FFFD. Returns NULL if either input is NULL. This follows Spark 4.0. Pre-Spark 4.0 accepted Java aliases (legacy mode supports a fixed set of aliases: `UTF8`, `ASCII`, `LATIN1`, `ISO88591`, `UTF16`, `UTF16BE`, `UTF16LE`, `UTF32`, `UTF32BE`, `UTF32LE`) and replaced unmappable characters with `?`; those legacy behaviors can be enabled programmatically via `with_legacy_java_charsets(true)` and `with_legacy_coding_error_action(true)`.
 
 ```sql
 encode(str, charset)
@@ -1155,8 +1200,8 @@ encode(str, charset)
 537061726b2053514c
 > SELECT encode('AB', 'utf-16le');
 41004200
-> SELECT encode('é', 'us-ascii');
-3f
+> SELECT encode('Spark SQL', 'us-ascii');
+537061726b2053514c
 ```
 
 #### `to_binary`
@@ -1235,18 +1280,21 @@ D76D
 - [add_months](#add_months)
 - [date_add](#date_add)
 - [date_diff](#date_diff)
+- [date_from_unix_date](#date_from_unix_date)
 - [date_part](#date_part)
 - [date_sub](#date_sub)
 - [date_trunc](#date_trunc)
 - [dateadd](#dateadd)
 - [datediff](#datediff)
 - [datepart](#datepart)
+- [dayname](#dayname)
 - [from_utc_timestamp](#from_utc_timestamp)
 - [hour](#hour)
 - [last_day](#last_day)
 - [make_dt_interval](#make_dt_interval)
 - [make_interval](#make_interval)
 - [minute](#minute)
+- [monthname](#monthname)
 - [next_day](#next_day)
 - [second](#second)
 - [time_trunc](#time_trunc)
@@ -1350,6 +1398,29 @@ datediff(end_date, start_date)
 
 - datediff
 
+#### `date_from_unix_date`
+
+Returns the date that is `days` days after 1970-01-01. This is the inverse of `unix_date`. DataFusion has no built-in equivalent. Negative values give dates before the epoch. Any INT is a valid date. Other numeric and string inputs are cast to INT first, which truncates fractions and raises an error if the value is out of the INT range or is not a valid number. These errors match Spark with ANSI mode enabled. With ANSI mode disabled, Spark wraps an out-of-range BIGINT and returns NULL for a malformed string, while this function still errors (see https://github.com/apache/datafusion-spark/issues/88). Returns NULL if the input is NULL.
+
+```sql
+date_from_unix_date(days)
+```
+
+##### Arguments
+
+- **days**: Number of days since 1970-01-01, as an INT. Other integer, floating-point, decimal and string inputs are cast to INT. BOOLEAN is rejected. NULL returns NULL.
+
+##### Example
+
+```sql
+> SELECT date_from_unix_date(1000);
+1972-09-27
+> SELECT date_from_unix_date(-1);
+1969-12-31
+> SELECT date_from_unix_date(NULL);
+NULL
+```
+
 #### `date_part`
 
 Extracts a field from a date or timestamp, as an INT. Unlike DataFusion's `date_part`, it accepts Spark's field names and abbreviations (case-insensitive), and `DAYOFWEEK`/`DOW` counts from 1 (Sunday) to 7 (Saturday) where DataFusion's `dow` counts from 0 (Sunday). `DAYOFWEEK_ISO`/`DOW_ISO` counts from 1 (Monday) to 7 (Sunday), and `YEAROFWEEK` is the ISO week-numbering year. A field name Spark does not accept (such as `QUARTERS` or `DAYOFYEAR`) is an error at planning time. A NULL field or source returns NULL. `SECOND` returns whole seconds; Spark returns DECIMAL(8, 6) including the fraction of a second.
@@ -1448,6 +1519,31 @@ _Alias of [date_diff](#date_diff)._
 
 _Alias of [date_part](#date_part)._
 
+#### `dayname`
+
+Returns the three-letter abbreviated English day name (`Mon` to `Sun`) of a date. DataFusion has no built-in `dayname`. Strings are implicitly cast to DATE. A malformed string is an error, even with ANSI mode off where Spark returns NULL. Timestamps are cast to DATE first, so the time of day is ignored. A timestamp with a time zone is converted in its own time zone, not the session time zone that Spark uses. Returns NULL if the input is NULL.
+
+```sql
+dayname(date)
+```
+
+##### Arguments
+
+- **date**: DATE, TIMESTAMP or string expression. NULL returns NULL.
+
+##### Example
+
+```sql
+> SELECT dayname('2008-02-20'::DATE);
+Wed
+> SELECT dayname('2008-02-20');
+Wed
+> SELECT dayname(arrow_cast('2024-05-20 23:59:59', 'Timestamp(Microsecond, None)'));
+Mon
+> SELECT dayname(NULL::DATE);
+NULL
+```
+
 #### `from_utc_timestamp`
 
 Treats `ts` as a UTC wall-clock time and returns the wall-clock time in time zone `tz`. DataFusion has no built-in equivalent. A string `ts` is cast to a timestamp, so a string with an offset is first converted to UTC. The result has the same type as `ts`, including any time zone it carries. Returns NULL if either argument is NULL. `tz` accepts Spark's spellings: region IDs, offsets such as `+01:00`, `GMT+1`, `UTC+1:2` and `UT-010203`, Java short IDs such as `PST`, and legacy `SystemV/` IDs. An offset beyond 18 hours or an unknown zone is an error. Differences from Spark: `tz` is only parsed for rows where both arguments are non-NULL, so an invalid constant `tz` can return NULL where Spark raises an error; conversion is limited to Chrono's calendar range, which is narrower than the range Spark implements but covers Spark's documented range; and region rules from `chrono-tz` may differ after 2099, because it does not extrapolate later daylight saving time transitions.
@@ -1520,7 +1616,7 @@ NULL
 
 #### `make_dt_interval`
 
-Returns a day-time interval built from days, hours, minutes and seconds. DataFusion has no built-in equivalent. All arguments are optional from the right and default to 0, so `make_dt_interval()` is a zero interval. Components can be negative and are added together, so `make_dt_interval(1, -24)` is zero. The result is a `Duration(Microsecond)` rather than an Arrow interval, because Arrow's day-time interval only has millisecond precision while Spark's has microsecond precision. Returns NULL if any argument is NULL or `secs` is NaN or infinite. Overflow returns NULL, where Spark raises an error ([#20](https://github.com/apache/datafusion-spark/issues/20)). Because hours and minutes are added up in 32-bit integers, more than 1,491,308 days also returns NULL, although Spark returns the interval ([#109](https://github.com/apache/datafusion-spark/issues/109)). Unlike Spark, where `secs` is a DECIMAL(18, 6), `secs` is cast to DOUBLE and the fraction is rounded to microseconds.
+Returns a day-time interval built from days, hours, minutes and seconds. DataFusion has no built-in equivalent. All arguments are optional from the right and default to 0, so `make_dt_interval()` is a zero interval. Components can be negative and are added together, so `make_dt_interval(1, -24)` is zero. The result is a `Duration(Microsecond)` rather than an Arrow interval, because Arrow's day-time interval only has millisecond precision while Spark's has microsecond precision. Returns NULL if any argument is NULL or `secs` is NaN or infinite. Overflow returns NULL, where Spark raises an error ([#20](https://github.com/apache/datafusion-spark/issues/20)). Unlike Spark, where `secs` is a DECIMAL(18, 6), `secs` is cast to DOUBLE and the fraction is rounded to microseconds.
 
 ```sql
 make_dt_interval([days[, hours[, mins[, secs]]]])
@@ -1592,9 +1688,34 @@ minute(timestamp)
 NULL
 ```
 
+#### `monthname`
+
+Returns the three-letter abbreviated English month name (`Jan` to `Dec`) of a date. DataFusion has no built-in `monthname`. Strings are implicitly cast to DATE. A malformed string is an error, even with ANSI mode off where Spark returns NULL. Timestamps are cast to DATE first, so the time of day is ignored. A timestamp with a time zone is converted in its own time zone, not the session time zone that Spark uses. Returns NULL if the input is NULL.
+
+```sql
+monthname(date)
+```
+
+##### Arguments
+
+- **date**: DATE, TIMESTAMP or string expression. NULL returns NULL.
+
+##### Example
+
+```sql
+> SELECT monthname('2008-02-20'::DATE);
+Feb
+> SELECT monthname('2008-02-20');
+Feb
+> SELECT monthname('2024-03-15 12:34:56'::TIMESTAMP);
+Mar
+> SELECT monthname(NULL::DATE);
+NULL
+```
+
 #### `next_day`
 
-Returns the first date after `start_date` that falls on `day_of_week`. The result is always later than `start_date`: if `start_date` is already that day, the date one week later is returned. DataFusion has no built-in `next_day`. Strings and timestamps are cast to DATE first. Returns NULL if either input is NULL, or if `day_of_week` is not a recognized day name (including names padded with whitespace). Spark raises an error for an unrecognized day name when ANSI mode is enabled; this implementation always returns NULL ([#113](https://github.com/apache/datafusion-spark/issues/113)).
+Returns the first date after `start_date` that falls on `day_of_week`. The result is always later than `start_date`: if `start_date` is already that day, the date one week later is returned. DataFusion has no built-in `next_day`. Strings and timestamps are cast to DATE first. Returns NULL if either input is NULL, or if `day_of_week` is not a recognized day name (including names padded with whitespace) when ANSI mode is disabled. Spark raises an `[ILLEGAL_DAY_OF_WEEK]` error for an unrecognized day name when ANSI mode is enabled.
 
 ```sql
 next_day(start_date, day_of_week)
@@ -1603,7 +1724,7 @@ next_day(start_date, day_of_week)
 ##### Arguments
 
 - **start_date**: DATE, TIMESTAMP or string expression. NULL returns NULL.
-- **day_of_week**: Day of the week, case-insensitive: a two-letter abbreviation (`MO`), a three-letter abbreviation (`Mon`) or the full name (`Monday`). Other types are cast to string. NULL or an unrecognized value returns NULL.
+- **day_of_week**: Day of the week, case-insensitive: a two-letter abbreviation (`MO`), a three-letter abbreviation (`Mon`) or the full name (`Monday`). Other types are cast to string. NULL or an unrecognized value returns NULL (or an error when `datafusion.execution.enable_ansi_mode` is true).
 
 ##### Example
 
@@ -1829,6 +1950,7 @@ NULL
 ### Array Functions
 
 - [array](#array)
+- [array_position](#array_position)
 - [array_repeat](#array_repeat)
 - [shuffle](#shuffle)
 - [size](#size)
@@ -1855,6 +1977,28 @@ array(expr, ...)
 [1, NULL, 3]
 > SELECT array();
 []
+```
+
+#### `array_position`
+
+Returns the 1-based position of the first occurrence of the element in the array, as a `BIGINT`. The DataFusion built-in returns a `UInt64`, and returns NULL when the element is not found, where this returns 0. The result is NULL only when the array or the element is NULL: a NULL element returns NULL even if the array contains NULL, while in the DataFusion built-in a NULL element matches the first NULL in the array. Top-level NULL elements in the array never match, while corresponding NULLs nested inside compared arrays or structs are equal. For floating point values, also inside nested arrays and structs, NaN is equal to NaN and -0.0 is equal to 0.0. As in Spark, the array element and the element are cast to their tightest common type: numbers widen, an integer widens to a decimal only if the decimal can hold all its values, and a date widens to a timestamp. Other combinations are an error, for example a string and a number, two different decimals, or structs whose field names or field types differ, as in Spark with ANSI mode off (with ANSI mode on, Spark widens struct field types). A NULL-typed array and map elements are also an error.
+
+```sql
+array_position(array, element)
+```
+
+##### Arguments
+
+- **array**: Array expression. NULL returns NULL.
+- **element**: Element to search for. NULL returns NULL.
+
+##### Example
+
+```sql
+> SELECT array_position(array(3, 2, 1), 1);
+3
+> SELECT array_position(array(3, 2, 1), 4);
+0
 ```
 
 #### `array_repeat`
@@ -2162,7 +2306,33 @@ stack(n, expr1[, ..., exprk])
 
 ### JSON Functions
 
+- [json_array_length](#json_array_length)
 - [json_tuple](#json_tuple)
+
+#### `json_array_length`
+
+Returns the number of elements in the outermost JSON array. Returns NULL for a NULL input, an empty or blank string, invalid or truncated JSON, and any valid JSON value that is not an array. Like Spark, the array is read up to its closing bracket and anything after it is ignored. Known differences from Spark, which parses with Jackson configured to accept single-quoted strings and unescaped control characters (Hive compatibility): those inputs return NULL here. Jackson also limits nesting to 1000 levels and number literals to 1000 digits, and Spark returns NULL beyond those limits, while such arrays are still counted here.
+
+```sql
+json_array_length(json_array)
+```
+
+##### Arguments
+
+- **json_array**: String expression containing a JSON array. Other types are rejected at planning time. NULL returns NULL.
+
+##### Example
+
+```sql
+> SELECT json_array_length('[1,2,3,[33,44],{"key":[2,3,4]}]');
+5
+> SELECT json_array_length('[1,2] trailing');
+2
+> SELECT json_array_length('{"key":"not a json array"}');
+NULL
+> SELECT json_array_length('[1,2');
+NULL
+```
 
 #### `json_tuple`
 
