@@ -24,15 +24,18 @@ criterion = "0.8"
 datafusion = { git = "https://github.com/apache/datafusion", branch = "branch-56", default-features = false }
 datafusion-common = { git = "https://github.com/apache/datafusion", branch = "branch-56", default-features = false }
 datafusion-expr = { git = "https://github.com/apache/datafusion", branch = "branch-56", default-features = false }
+datafusion-doc = { git = "https://github.com/apache/datafusion", branch = "branch-56" }
 datafusion-functions = { git = "https://github.com/apache/datafusion", branch = "branch-56" }
 datafusion-functions-aggregate = { git = "https://github.com/apache/datafusion", branch = "branch-56" }
 datafusion-functions-aggregate-common = { git = "https://github.com/apache/datafusion", branch = "branch-56" }
 datafusion-functions-nested = { git = "https://github.com/apache/datafusion", branch = "branch-56", default-features = false }
+datafusion-macros = { git = "https://github.com/apache/datafusion", branch = "branch-56" }
 datafusion-physical-expr-common = { git = "https://github.com/apache/datafusion", branch = "branch-56", default-features = false }
 datafusion-session = { git = "https://github.com/apache/datafusion", branch = "branch-56" }
 log = "^0.4"
 num-traits = { version = "0.2" }
 rand = "0.9"
+serde = "1"
 serde_json = "1"
 sha2 = "^0.11.0"
 tokio = { version = "1.52", features = ["macros", "rt", "sync"] }
