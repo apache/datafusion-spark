@@ -125,6 +125,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_spark_features_preserve_configured_policy() {
+        let state = SessionStateBuilder::new()
+            .with_config(SessionConfig::new().with_option_extension(SparkOptions {
+                map_key_dedup_policy: crate::MapKeyDedupPolicy::LastWin,
+            }))
+            .with_spark_features()
+            .build();
+
+        assert_eq!(
+            state
+                .config_options()
+                .extensions
+                .get::<SparkOptions>()
+                .unwrap()
+                .map_key_dedup_policy,
+            crate::MapKeyDedupPolicy::LastWin
+        );
+    }
+
     #[tokio::test]
     async fn test_spark_dialect_with_spark_functions() {
         let query = "SELECT sha2('abc', 256), CAST(1 AS LONG)";

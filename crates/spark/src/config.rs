@@ -9,6 +9,7 @@ use datafusion_common::config::{ConfigExtension, ConfigField, ConfigOptions, Vis
 use datafusion_common::extensions_options;
 use datafusion_common::{DataFusionError, Result};
 
+/// Policy for handling duplicate keys in Spark map functions.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum MapKeyDedupPolicy {
     #[default]
@@ -51,7 +52,10 @@ impl fmt::Display for MapKeyDedupPolicy {
 }
 
 extensions_options! {
+    /// Spark-specific configuration options under the `spark` namespace.
     pub struct SparkOptions {
+        /// How to handle duplicate map keys: EXCEPTION raises an error (default),
+        /// while LAST_WIN keeps the last value for each key.
         pub map_key_dedup_policy: MapKeyDedupPolicy, default = MapKeyDedupPolicy::Exception
     }
 }
@@ -61,11 +65,18 @@ impl ConfigExtension for SparkOptions {
 }
 
 /// Returns whether Spark map functions should keep the last value for duplicate keys.
+///
+/// The new key is `spark.map_key_dedup_policy`. For DataFusion 56 compatibility,
+/// the legacy `datafusion.spark.map_key_dedup_policy` is also honored: LAST_WIN
+/// on either key takes precedence over EXCEPTION on the other.
+/// Remove the legacy lookup when upgrading to DataFusion 57.
 pub fn map_last_value_wins(options: &ConfigOptions) -> bool {
     options
         .extensions
         .get::<SparkOptions>()
         .is_some_and(|options| options.map_key_dedup_policy == MapKeyDedupPolicy::LastWin)
+        || options.spark.map_key_dedup_policy
+            == datafusion_common::config::MapKeyDedupPolicy::LastWin
 }
 
 #[cfg(test)]
@@ -118,5 +129,40 @@ mod tests {
         });
 
         assert!(map_last_value_wins(&config));
+    }
+
+    #[test]
+    fn legacy_and_extension_policy_combinations() {
+        for legacy in ["EXCEPTION", "LAST_WIN"] {
+            for extension in [None, Some("EXCEPTION"), Some("LAST_WIN")] {
+                let mut config = ConfigOptions::default();
+                config
+                    .set("datafusion.spark.map_key_dedup_policy", legacy)
+                    .unwrap();
+                if let Some(policy) = extension {
+                    config.extensions.insert(SparkOptions::default());
+                    config.set("spark.map_key_dedup_policy", policy).unwrap();
+                }
+
+                assert_eq!(
+                    map_last_value_wins(&config),
+                    legacy == "LAST_WIN" || extension == Some("LAST_WIN"),
+                    "legacy={legacy}, extension={extension:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn map_policy_has_description() {
+        let entries = datafusion_common::config::ExtensionOptions::entries(
+            &SparkOptions::default(),
+        );
+        let entry = entries
+            .iter()
+            .find(|entry| entry.key == "map_key_dedup_policy")
+            .unwrap();
+        assert!(entry.description.contains("EXCEPTION"));
+        assert!(entry.description.contains("LAST_WIN"));
     }
 }

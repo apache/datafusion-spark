@@ -111,7 +111,6 @@ pub fn map_type_from_key_value_types(
 ///    and is driven by `last_value_wins`:
 ///    - `false` (Spark's default `EXCEPTION`): raise `[DUPLICATED_MAP_KEY]` on any duplicate.
 ///    - `true` (`LAST_WIN`): keep the last occurrence of each duplicate key.
-///
 pub fn map_from_keys_values_offsets_nulls(
     flat_keys: &ArrayRef,
     flat_values: &ArrayRef,
@@ -142,6 +141,7 @@ pub fn map_from_keys_values_offsets_nulls(
         field, offsets, entries, nulls, false,
     )?))
 }
+
 #[allow(clippy::allow_attributes, clippy::mutable_key_type)] // ScalarValue has interior mutability but is intentionally used as hash key
 fn map_deduplicate_keys(
     flat_keys: &ArrayRef,
