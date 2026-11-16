@@ -349,7 +349,7 @@ fn finer_unit(left: TimeUnit, right: TimeUnit) -> TimeUnit {
 }
 
 /// Spark cannot order maps, so it rejects them at any depth of the element type.
-fn contains_map(data_type: &DataType) -> bool {
+pub(super) fn contains_map(data_type: &DataType) -> bool {
     match data_type {
         DataType::Map(_, _) => true,
         DataType::List(field)
