@@ -1,0 +1,137 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
+# SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
+
+## Spark-compatible nanvl() tests
+## See https://github.com/apache/datafusion-spark/issues/268
+
+## Basic NaN replacement
+query R
+SELECT nanvl(CAST('NaN' AS DOUBLE), 123);
+----
+123
+
+## Non-NaN expr1 is returned unchanged; a NULL expr2 doesn't matter
+query R
+SELECT nanvl(5.0::double, CAST(NULL AS DOUBLE));
+----
+5
+
+## NULL expr1 always gives NULL, regardless of expr2
+query R
+SELECT nanvl(CAST(NULL AS DOUBLE), 5.0::double);
+----
+NULL
+
+## NaN expr1 with NULL expr2 gives NULL
+query R
+SELECT nanvl(CAST('NaN' AS DOUBLE), CAST(NULL AS DOUBLE));
+----
+NULL
+
+## NaN expr1 with NaN expr2 gives NaN
+query R
+SELECT nanvl(CAST('NaN' AS DOUBLE), CAST('NaN' AS DOUBLE));
+----
+NaN
+
+## +/-Infinity and -0.0 are not NaN and pass through unchanged, sign preserved
+query R
+SELECT nanvl(CAST('Infinity' AS DOUBLE), 0.0::double);
+----
+Infinity
+
+query R
+SELECT nanvl(CAST('-Infinity' AS DOUBLE), 0.0::double);
+----
+-Infinity
+
+query R
+SELECT nanvl(-0.0::double, 1.0::double);
+----
+0
+
+## FLOAT/FLOAT stays FLOAT; any FLOAT/DOUBLE mix promotes to DOUBLE
+query R
+SELECT nanvl(CAST('NaN' AS FLOAT), CAST('NaN' AS FLOAT));
+----
+NaN
+
+query R
+SELECT nanvl(CAST('NaN' AS FLOAT), 1.0::double);
+----
+1
+
+query R
+SELECT nanvl(1.0::double, CAST('NaN' AS FLOAT));
+----
+1
+
+## Integer and DECIMAL arguments are implicitly cast to DOUBLE
+query R
+SELECT nanvl(1, 2);
+----
+1
+
+query R
+SELECT nanvl(CAST(1 AS DECIMAL(10,2)), 2);
+----
+1
+
+## Wider precision/scale DECIMAL still coerces to DOUBLE
+query R
+SELECT nanvl(CAST(123.456 AS DECIMAL(20,5)), 999::double);
+----
+123.456
+
+## DECIMAL on expr2's side also coerces, and only matters when expr1 is NaN
+query R
+SELECT nanvl(CAST('NaN' AS DOUBLE), CAST(42.5 AS DECIMAL(10,2)));
+----
+42.5
+
+## DECIMAL with negative scale / small precision
+query R
+SELECT nanvl(CAST(7 AS DECIMAL(3,0)), 1::double);
+----
+7
+
+## Both arguments DECIMAL: still promotes to DOUBLE (never FLOAT), since DECIMAL
+## is never the FLOAT/FLOAT special case
+query R
+SELECT nanvl(CAST('NaN' AS DOUBLE), CAST(3.14 AS DECIMAL(5,2)));
+----
+3.14
+
+## Scalar and array combinations
+query R
+SELECT nanvl(c2, 1.0::double) FROM (VALUES (0.0::double), (1.0::double), (1.0::double), (0.0::double)) t(c2) ORDER BY 1;
+----
+0
+0
+1
+1
+
+## Lazy evaluation of expr2: an error in expr2 must not surface when expr1 is not NaN,
+## even under ANSI mode, where eager evaluation of `1 / 0` would raise DIVIDE_BY_ZERO.
+statement ok
+SET datafusion.execution.enable_ansi_mode = true;
+
+query R
+SELECT nanvl(c2, 1 / 0) FROM (VALUES (0), (1), (1), (0)) t(c2) ORDER BY 1;
+----
+0
+0
+1
+1
+
+query R
+SELECT nanvl(1 - 0, 1 / 0) FROM (VALUES (0), (1), (1), (0)) t(c2);
+----
+1
+1
+1
+1
+
+statement ok
+SET datafusion.execution.enable_ansi_mode = false;
