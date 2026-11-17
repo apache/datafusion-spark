@@ -5,17 +5,16 @@
 //! Spark-compatible `array_max` and `array_min`.
 
 use crate::function::float_normalize::normalize_array;
-use crate::function::type_coercion::is_orderable;
+use crate::function::type_coercion::{is_orderable, spark_sql_type};
 use arrow::array::{
     Array, ArrayRef, ArrowPrimitiveType, AsArray, GenericListArray, OffsetSizeTrait,
     PrimitiveArray, UInt64Array, make_comparator, new_null_array,
 };
 use arrow::compute::{SortOptions, take};
 use arrow::datatypes::{
-    DataType, Date32Type, Date64Type, Decimal128Type, Decimal256Type, Field, Float16Type,
-    Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, TimeUnit,
-    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
-    TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+    DataType, Date32Type, Decimal128Type, Field, Float32Type, Float64Type, Int8Type,
+    Int16Type, Int32Type, Int64Type, TimeUnit, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
 };
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, ScalarValue, exec_err, plan_err};
@@ -39,8 +38,11 @@ use std::sync::Arc;
         tie the first of the tied elements is returned as it is, so the sign of a zero and the \
         bits of a NaN are kept. Strings and binary values compare bytewise. Arrays compare \
         element by element and then by length, and structs compare field by field; NULLs \
-        nested inside them sort before other values. Map elements, at any depth, are an \
-        error, as in Spark.",
+        nested inside them sort before other values. Map and INTERVAL elements, at any \
+        depth, are an error, as in Spark. DataFusion's built-in of the same name differs: it \
+        orders -0.0 before 0.0 rather than returning the first of them, sorts NULLs nested \
+        inside arrays and structs after other values, rejects a NULL argument at planning \
+        instead of returning NULL, and fails at execution on map elements.",
     syntax_example = "array_max(array)",
     sql_example = r#"```sql
 > SELECT array_max(array(1, 20, NULL, 3));
@@ -105,8 +107,11 @@ impl ScalarUDFImpl for SparkArrayMax {
         tie the first of the tied elements is returned as it is, so the sign of a zero and the \
         bits of a NaN are kept. Strings and binary values compare bytewise. Arrays compare \
         element by element and then by length, and structs compare field by field; NULLs \
-        nested inside them sort before other values. Map elements, at any depth, are an \
-        error, as in Spark.",
+        nested inside them sort before other values. Map and INTERVAL elements, at any \
+        depth, are an error, as in Spark. DataFusion's built-in of the same name differs: it \
+        orders -0.0 before 0.0 rather than returning the first of them, sorts NULLs nested \
+        inside arrays and structs after other values, rejects a NULL argument at planning \
+        instead of returning NULL, and fails at execution on map elements.",
     syntax_example = "array_min(array)",
     sql_example = r#"```sql
 > SELECT array_min(array(1, 20, NULL, 3));
@@ -189,7 +194,8 @@ fn coerce_array(name: &str, arg_types: &[DataType]) -> Result<Vec<DataType>> {
     if !is_orderable(&element) {
         return plan_err!(
             "[DATATYPE_MISMATCH.INVALID_ORDERING_TYPE] The `{name}` does not support \
-             ordering on type {element}"
+             ordering on type \"{}\". SQLSTATE: 42K09",
+            spark_sql_type(&element)
         );
     }
     Ok(vec![coerced])
@@ -198,7 +204,8 @@ fn coerce_array(name: &str, arg_types: &[DataType]) -> Result<Vec<DataType>> {
 fn unexpected_input_type<T>(name: &str, data_type: &DataType) -> Result<T> {
     plan_err!(
         "[DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE] The first parameter of `{name}` \
-         requires the \"ARRAY\" type, however it has the type {data_type}"
+         requires the \"ARRAY\" type, however it has the type \"{}\". SQLSTATE: 42K09",
+        spark_sql_type(data_type)
     )
 }
 
@@ -267,14 +274,8 @@ fn extrema<O: OffsetSizeTrait>(
         DataType::Int16 => ordered!(Int16Type),
         DataType::Int32 => ordered!(Int32Type),
         DataType::Int64 => ordered!(Int64Type),
-        DataType::UInt8 => ordered!(UInt8Type),
-        DataType::UInt16 => ordered!(UInt16Type),
-        DataType::UInt32 => ordered!(UInt32Type),
-        DataType::UInt64 => ordered!(UInt64Type),
         DataType::Decimal128(_, _) => ordered!(Decimal128Type),
-        DataType::Decimal256(_, _) => ordered!(Decimal256Type),
         DataType::Date32 => ordered!(Date32Type),
-        DataType::Date64 => ordered!(Date64Type),
         DataType::Timestamp(TimeUnit::Second, _) => ordered!(TimestampSecondType),
         DataType::Timestamp(TimeUnit::Millisecond, _) => {
             ordered!(TimestampMillisecondType)
@@ -285,7 +286,6 @@ fn extrema<O: OffsetSizeTrait>(
         DataType::Timestamp(TimeUnit::Nanosecond, _) => {
             ordered!(TimestampNanosecondType)
         }
-        DataType::Float16 => primitive!(Float16Type, spark_float_cmp),
         DataType::Float32 => primitive!(Float32Type, spark_float_cmp),
         DataType::Float64 => primitive!(Float64Type, spark_float_cmp),
         _ => {}

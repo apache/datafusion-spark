@@ -27,7 +27,7 @@ SELECT array_max(array(CAST(NULL AS INT)));
 NULL
 
 # Spark accepts an untyped NULL, an empty array and an array of untyped NULLs, and returns
-# a NULL of the NULL type.
+# a NULL of the NULL type. DataFusion's built-in raises a planning error for these.
 query ??
 SELECT array_max(NULL), array_min(NULL);
 ----
@@ -56,7 +56,9 @@ SELECT array_max(array(CAST('NaN' AS FLOAT), CAST(1.5 AS FLOAT))), array_min(arr
 ----
 NaN 1.5
 
-# -0.0 equals 0.0, so the first of them is returned, with its sign. The test runner prints
+# -0.0 equals 0.0, so the first of them is returned, with its sign. DataFusion's built-in
+# orders -0.0 before 0.0, so its array_max returns 0.0 and its array_min -0.0 for both
+# orders. The test runner prints
 # both zeros as 0, so the sign is checked by casting the result to a string.
 query RRRR
 SELECT array_max(array(CAST(0.0 AS DOUBLE), CAST('-0.0' AS DOUBLE))),
@@ -128,7 +130,8 @@ SELECT array_max(array(array(1, 2), array(1, 2, 3), array(2))), array_min(array(
 ----
 [2] []
 
-# A NULL nested inside an array sorts before other values
+# A NULL nested inside an array sorts before other values. DataFusion's built-in sorts it
+# after them, and its array_max returns [1, NULL] here.
 query ??
 SELECT array_min(array(array(1, NULL), array(1, 2))), array_max(array(array(1, NULL), array(1, 2)));
 ----
@@ -190,14 +193,21 @@ NaN 1.5 NaN 1.5
 0 0 -0.0 -0.0
 0 0 0.0 0.0
 
-# Maps cannot be ordered, at any depth
-query error \[DATATYPE_MISMATCH\.INVALID_ORDERING_TYPE\] The `array_max` does not support ordering on type
+# Maps cannot be ordered, at any depth. DataFusion's built-in fails at execution instead.
+query error \[DATATYPE_MISMATCH\.INVALID_ORDERING_TYPE\] The `array_max` does not support ordering on type "MAP<BIGINT, BIGINT>"\. SQLSTATE: 42K09
 SELECT array_max(array(map(1, 2)));
 
-query error \[DATATYPE_MISMATCH\.INVALID_ORDERING_TYPE\] The `array_min` does not support ordering on type
+query error \[DATATYPE_MISMATCH\.INVALID_ORDERING_TYPE\] The `array_min` does not support ordering on type "ARRAY<MAP<BIGINT, BIGINT>>"\. SQLSTATE: 42K09
 SELECT array_min(array(array(map(1, 2))));
 
-query error \[DATATYPE_MISMATCH\.UNEXPECTED_INPUT_TYPE\] The first parameter of `array_max` requires the "ARRAY" type
+# Intervals cannot be ordered, at any depth
+query error \[DATATYPE_MISMATCH\.INVALID_ORDERING_TYPE\] The `array_max` does not support ordering on type "INTERVAL"\. SQLSTATE: 42K09
+SELECT array_max(array(make_interval(1)));
+
+query error \[DATATYPE_MISMATCH\.INVALID_ORDERING_TYPE\] The `array_min` does not support ordering on type "STRUCT<i: INTERVAL>"\. SQLSTATE: 42K09
+SELECT array_min(array(named_struct('i', make_interval(1))));
+
+query error \[DATATYPE_MISMATCH\.UNEXPECTED_INPUT_TYPE\] The first parameter of `array_max` requires the "ARRAY" type, however it has the type "BIGINT"\. SQLSTATE: 42K09
 SELECT array_max(1);
 
 query error \[DATATYPE_MISMATCH\.UNEXPECTED_INPUT_TYPE\] The first parameter of `array_min` requires the "ARRAY" type
