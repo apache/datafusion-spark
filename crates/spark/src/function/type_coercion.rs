@@ -26,6 +26,14 @@ pub(crate) fn tightest_common_type(
     if left == right {
         return Some(left.clone());
     }
+    // Spark has no dictionary types. A dictionary-encoded argument, such as a
+    // Parquet string column, has the type of its values.
+    if let Dictionary(_, value) = left {
+        return tightest_common_type(value, right, ansi_mode);
+    }
+    if let Dictionary(_, value) = right {
+        return tightest_common_type(left, value, ansi_mode);
+    }
     if let (Some(l), Some(r)) = (numeric_precedence(left), numeric_precedence(right)) {
         let wider = if l >= r { left } else { right };
         // With ANSI mode on, an integer and a FLOAT widen to DOUBLE, which holds every INT
@@ -156,6 +164,7 @@ pub(crate) fn is_orderable(data_type: &DataType) -> bool {
 pub(crate) fn struct_field_types_match(left: &DataType, right: &DataType) -> bool {
     use DataType::*;
     match (left, right) {
+        (Dictionary(_, l), r) | (r, Dictionary(_, l)) => struct_field_types_match(l, r),
         (
             List(l) | LargeList(l) | FixedSizeList(l, _),
             List(r) | LargeList(r) | FixedSizeList(r, _),
@@ -178,6 +187,7 @@ pub(crate) fn struct_field_types_match(left: &DataType, right: &DataType) -> boo
 fn same_type(left: &DataType, right: &DataType) -> bool {
     use DataType::*;
     match (left, right) {
+        (Dictionary(_, l), r) | (r, Dictionary(_, l)) => same_type(l, r),
         (List(l), List(r)) | (LargeList(l), LargeList(r)) | (Map(l, _), Map(r, _)) => {
             same_type(l.data_type(), r.data_type())
         }
@@ -238,6 +248,7 @@ pub(crate) fn spark_sql_type(data_type: &DataType) -> String {
             ),
             other => format!("MAP<{other}>"),
         },
+        Dictionary(_, value) => spark_sql_type(value),
         other => other.to_string(),
     }
 }
@@ -380,6 +391,28 @@ mod tests {
             &map(Int64, long)
         ));
         assert!(struct_field_types_match(&list(Int32), &list(Int64)));
+    }
+
+    #[test]
+    fn dictionaries_have_the_type_of_their_values() {
+        let dictionary = |value: DataType| Dictionary(Box::new(Int32), Box::new(value));
+        assert_eq!(
+            tightest_common_type(&dictionary(Utf8), &Utf8, false),
+            Some(Utf8)
+        );
+        assert_eq!(
+            tightest_common_type(&Int64, &dictionary(Int32), false),
+            Some(Int64)
+        );
+        assert_eq!(tightest_common_type(&dictionary(Utf8), &Int32, false), None);
+        let field = |data_type: DataType| {
+            Struct(Fields::from(vec![Field::new("a", data_type, true)]))
+        };
+        assert!(struct_field_types_match(
+            &field(dictionary(Utf8)),
+            &field(Utf8)
+        ));
+        assert_eq!(spark_sql_type(&dictionary(Utf8)), "STRING");
     }
 
     #[test]

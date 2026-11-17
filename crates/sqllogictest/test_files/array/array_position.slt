@@ -292,6 +292,12 @@ SELECT array_position(array(X'01'), '1');
 query error \[DATATYPE_MISMATCH\.ARRAY_FUNCTION_DIFF_TYPES\]
 SELECT array_position(array(DATE '2020-01-01'), '2020-01-01');
 
+# A dictionary-encoded element or array has the type of its values
+query II
+SELECT array_position(array('a', 'b'), arrow_cast('b', 'Dictionary(Int32, Utf8)')), array_position(array(arrow_cast('a', 'Dictionary(Int32, Utf8)'), arrow_cast('b', 'Dictionary(Int32, Utf8)')), 'b');
+----
+2 2
+
 # DATE and TIMESTAMP become TIMESTAMP
 query I
 SELECT array_position(array(DATE '2020-01-01'), TIMESTAMP '2020-01-01 00:00:00');
