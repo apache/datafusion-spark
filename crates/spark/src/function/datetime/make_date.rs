@@ -7,14 +7,15 @@ use std::sync::Arc;
 use arrow::array::{Array, Date32Array, Date32Builder, new_empty_array};
 use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::cast::as_int32_array;
-use datafusion_common::types::{NativeType, logical_int32, logical_string};
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, ScalarValue, exec_err, internal_err};
 use datafusion_expr::{
-    Coercion, ColumnarValue, Documentation, ReturnFieldArgs, ScalarFunctionArgs,
-    ScalarUDFImpl, Signature, TypeSignatureClass, Volatility,
+    ColumnarValue, Documentation, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl,
+    Signature, Volatility,
 };
 use datafusion_macros::user_doc;
+
+use super::date_part_name::int32_coercion;
 
 const ARITHMETIC_OVERFLOW_ERROR: &str = r#"[ARITHMETIC_OVERFLOW] overflow. If necessary set "spark.sql.ansi.enabled" to "false" to bypass this error. SQLSTATE: 22003"#;
 
@@ -23,8 +24,7 @@ const ARITHMETIC_OVERFLOW_ERROR: &str = r#"[ARITHMETIC_OVERFLOW] overflow. If ne
 /// <https://spark.apache.org/docs/latest/api/sql/index.html#make_date>
 #[user_doc(
     doc_section(label = "Time and Date Functions"),
-    description = "Creates a date from `year`, `month` and `day` fields. DataFusion has no built-in \
-        equivalent. Years from -999999999 to 999999999 are accepted (year 0 is 1 BC), as long as \
+    description = "Creates a date from `year`, `month` and `day` fields. Years from -999999999 to 999999999 are accepted (year 0 is 1 BC), as long as \
         the date fits the DATE range. When the fields do not form a valid date (for example \
         month 13 or February 29 in a non-leap year), the function returns NULL, or raises \
         DATETIME_FIELD_OUT_OF_BOUNDS when `datafusion.execution.enable_ansi_mode` is true. A \
@@ -32,9 +32,13 @@ const ARITHMETIC_OVERFLOW_ERROR: &str = r#"[ARITHMETIC_OVERFLOW] overflow. If ne
         ARITHMETIC_OVERFLOW in both modes, as in Spark. Other numeric and string inputs are cast \
         to INT first, which truncates fractions and raises an error if the value is out of the \
         INT range or is not a valid number. These errors match Spark with ANSI mode enabled. \
-        With ANSI mode disabled, Spark wraps an out-of-range BIGINT and returns NULL for a \
-        malformed string, while this function still errors (see \
-        https://github.com/apache/datafusion-spark/issues/88). Returns NULL if any input is NULL.",
+        With ANSI mode disabled, Spark wraps an out-of-range BIGINT, returns NULL for a \
+        malformed string, an infinite DOUBLE or a DECIMAL out of the INT range, and casts NaN \
+        to 0, while this function still errors (see \
+        https://github.com/apache/datafusion-spark/issues/88). Returns NULL if any input is \
+        NULL. DataFusion's built-in `make_date` differs: it raises an error for an invalid \
+        date regardless of ANSI mode, accepts only integer and string arguments, and is \
+        limited to years -262143 to 262142.",
     syntax_example = "make_date(year, month, day)",
     sql_example = r#"```sql
 > SELECT make_date(2013, 7, 15);
@@ -70,23 +74,10 @@ impl Default for SparkMakeDate {
 
 impl SparkMakeDate {
     pub fn new() -> Self {
-        // Spark declares the arguments as INT and implicitly casts other numeric
-        // and string types to it. DataFusion types bare integer literals as BIGINT.
-        let int32 = || {
-            Coercion::new_implicit(
-                TypeSignatureClass::Native(logical_int32()),
-                vec![
-                    TypeSignatureClass::Integer,
-                    TypeSignatureClass::Float,
-                    TypeSignatureClass::Decimal,
-                    TypeSignatureClass::Native(logical_string()),
-                ],
-                NativeType::Int32,
-            )
-        };
+        // Spark declares the arguments as INT.
         Self {
             signature: Signature::coercible(
-                vec![int32(), int32(), int32()],
+                vec![int32_coercion(), int32_coercion(), int32_coercion()],
                 Volatility::Immutable,
             ),
         }

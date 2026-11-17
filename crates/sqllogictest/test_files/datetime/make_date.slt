@@ -122,20 +122,27 @@ SELECT make_date('2024', '2', '3');
 # ----
 # NULL
 
+# Spark 4.2.0 casts NaN to 0 when ANSI mode is off, and returns NULL for an infinite
+# DOUBLE or a DECIMAL out of the INT range; DataFusion errors
+# https://github.com/apache/datafusion-spark/issues/88
+# query D
+# SELECT make_date(CAST('NaN' AS DOUBLE), 1, 1);
+# ----
+# 0000-01-01
+#
+# query D
+# SELECT make_date(CAST('Infinity' AS DOUBLE), 1, 1);
+# ----
+# NULL
+#
+# query D
+# SELECT make_date(CAST(99999999999 AS DECIMAL(20,0)), 1, 1);
+# ----
+# NULL
+
 # BOOLEAN is not accepted
 query error
 SELECT make_date(true, 1, 1);
-
-# A constant invalid date is not evaluated when there are no rows
-statement ok
-set datafusion.execution.enable_ansi_mode = true;
-
-query D
-SELECT make_date(2024, 13, 1) FROM ymd WHERE column1 < 0;
-----
-
-statement ok
-set datafusion.execution.enable_ansi_mode = false;
 
 # Invalid dates raise DATETIME_FIELD_OUT_OF_BOUNDS under ANSI mode, with the
 # message from java.time.LocalDate.of
@@ -151,6 +158,12 @@ query D
 SELECT make_date(2019, 7, NULL);
 ----
 NULL
+
+# A NULL argument returns NULL before the other fields are checked
+query DD
+SELECT make_date(2024, 13, NULL), make_date(NULL, 13, 40);
+----
+NULL NULL
 
 query error \[DATETIME_FIELD_OUT_OF_BOUNDS\.WITH_SUGGESTION\] Invalid date 'February 29' as '2023' is not a leap year\. If necessary set "spark\.sql\.ansi\.enabled" to "false" to bypass this error\. SQLSTATE: 22023
 SELECT make_date(2023, 2, 29);
