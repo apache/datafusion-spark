@@ -6,19 +6,19 @@ use arrow::array::{
     ArrayRef, AsArray, BinaryArrayType, BinaryBuilder, Int32Array, StringArray,
 };
 use arrow::datatypes::{DataType, Int32Type};
-use datafusion_common::types::{
-    NativeType, logical_binary, logical_int32, logical_string,
-};
+use datafusion_common::config::ConfigOptions;
 use datafusion_common::utils::hex::{HexCase, encode_bytes_into};
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, ScalarValue, internal_err};
 use datafusion_expr::{
-    Coercion, ColumnarValue, Documentation, ScalarFunctionArgs, ScalarUDFImpl, Signature,
-    TypeSignatureClass, Volatility,
+    ColumnarValue, Documentation, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
+    Signature, Volatility,
 };
 use datafusion_functions::utils::make_scalar_function;
 use datafusion_macros::user_doc;
 use sha2::{self, Digest};
+
+use crate::function::implicit_cast::{SparkInputType, SparkInputTypes};
 use std::sync::Arc;
 
 /// Spark-compatible `sha2` expression.
@@ -45,9 +45,10 @@ NULL
         description = "Integer SHA-2 variant: 224, 256, 384 or 512. 0 is treated as 256. Any other value, or NULL, returns NULL."
     )
 )]
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SparkSha2 {
     signature: Signature,
+    input_types: SparkInputTypes,
 }
 
 impl Default for SparkSha2 {
@@ -59,21 +60,12 @@ impl Default for SparkSha2 {
 impl SparkSha2 {
     pub fn new() -> Self {
         Self {
-            signature: Signature::coercible(
-                vec![
-                    Coercion::new_implicit(
-                        TypeSignatureClass::Native(logical_binary()),
-                        vec![TypeSignatureClass::Native(logical_string())],
-                        NativeType::Binary,
-                    ),
-                    Coercion::new_implicit(
-                        TypeSignatureClass::Native(logical_int32()),
-                        vec![TypeSignatureClass::Integer],
-                        NativeType::Int32,
-                    ),
-                ],
-                Volatility::Immutable,
-            ),
+            signature: Signature::user_defined(Volatility::Immutable),
+            // Spark's `Sha2.inputTypes`
+            input_types: SparkInputTypes::new(vec![
+                SparkInputType::Binary,
+                SparkInputType::Integer,
+            ]),
         }
     }
 }
@@ -85,6 +77,18 @@ impl ScalarUDFImpl for SparkSha2 {
 
     fn signature(&self) -> &Signature {
         &self.signature
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        self.input_types.coerce(self.name(), arg_types)
+    }
+
+    fn with_updated_config(&self, config: &ConfigOptions) -> Option<ScalarUDF> {
+        let input_types = self.input_types.with_config(config)?;
+        Some(ScalarUDF::from(Self {
+            input_types,
+            ..self.clone()
+        }))
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
