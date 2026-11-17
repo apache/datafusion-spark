@@ -46,10 +46,12 @@ SELECT nanvl(CAST('-Infinity' AS DOUBLE), 0.0::double);
 ----
 -Infinity
 
-## 1 / -0.0 is -Infinity, so this actually distinguishes -0.0 from 0.0,
-## unlike comparing the formatted result alone.
+## Checking the sign via string formatting, rather than 1/x, so this
+## matches Spark too: Spark's divide returns NULL for a zero divisor
+## (or raises under ANSI), so 1.0 / nanvl(-0.0, 1.0) is NULL on Spark,
+## not -Infinity like DataFusion's own division.
 query B
-SELECT 1.0 / nanvl(-0.0::double, 1.0::double) = CAST('-Infinity' AS DOUBLE);
+SELECT CAST(nanvl(-0.0::double, 1.0::double) AS VARCHAR) LIKE '-%';
 ----
 true
 
@@ -213,6 +215,15 @@ SELECT d, nanvl(d, s) FROM (VALUES (1.0::double, 'abc'), (CAST('NaN' AS DOUBLE),
 ----
 1 1
 NaN 2
+
+## A volatile expr1 (random()) paired with a STRING argument must still
+## work: the string cast in simplify() has to run before the volatility
+## check skips the CASE rewrite, or invoke_with_args receives a raw Utf8
+## array instead of the cast Float64 it expects.
+query T
+SELECT arrow_typeof(nanvl(random(), s)) FROM (VALUES ('1')) t(s);
+----
+Float64
 
 statement ok
 SET datafusion.execution.enable_ansi_mode = false;

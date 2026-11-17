@@ -153,23 +153,6 @@ impl ScalarUDFImpl for SparkNanvl {
     ) -> Result<ExprSimplifyResult> {
         let [expr1, expr2] = take_function_args("nanvl", args)?;
 
-        // A volatile expr1 (e.g. `rand()`) must be evaluated exactly once.
-        // The CASE rewrite below references expr1 twice - once in the
-        // condition and once in the ELSE branch - which would evaluate it
-        // separately in each place. Skip the rewrite for volatile input and
-        // fall back to `invoke_with_args`, which evaluates each argument
-        // array exactly once.
-        //
-        // Note this fallback also makes expr2 eager (invoke_with_args
-        // evaluates both arguments up front), so e.g.
-        // `nanvl(random(), 1 / 0)` under ANSI mode raises here even though
-        // Spark would not, since Spark only evaluates `1 / 0` on rows where
-        // `random()` is NaN (which never happens). Accepted as an edge
-        // case: a volatile expr1 paired with a fallible expr2 is unusual.
-        if expr1.is_volatile() {
-            return Ok(ExprSimplifyResult::Original(vec![expr1, expr2]));
-        }
-
         // A STRING argument is left unresolved by `coerce_types` (see its
         // comment) so it can be cast here instead of by the analyzer's own
         // always-strict implicit Cast. Spark's semantics are ANSI-aware: a
@@ -177,7 +160,10 @@ impl ScalarUDFImpl for SparkNanvl {
         // ANSI. Wrapping it in Cast/TryCast keeps that cast inside the
         // expression tree, where DataFusion's CASE evaluates it lazily -
         // a string expr2 is only cast (and can only fail) on rows where
-        // expr1 is actually NaN, matching Spark.
+        // expr1 is actually NaN, matching Spark. This must run before the
+        // volatility check below: `invoke_with_args` only ever handles
+        // Float32/Float64 arrays, so a string argument must already be
+        // cast to Float64 by the time a volatile expr1 falls back to it.
         let enable_ansi_mode = info.config_options().execution.enable_ansi_mode;
         let to_float64 = |e: Expr| -> Result<Expr> {
             if !is_string_type(&e.get_type(info.schema())?) {
@@ -192,6 +178,24 @@ impl ScalarUDFImpl for SparkNanvl {
         let expr1 = to_float64(expr1)?;
         let expr2 = to_float64(expr2)?;
 
+        // A volatile expr1 (e.g. `rand()`) must be evaluated exactly once.
+        // The CASE rewrite below references expr1 twice - once in the
+        // condition and once in the ELSE branch - which would evaluate it
+        // separately in each place. Skip the rewrite for volatile input and
+        // fall back to `invoke_with_args`, which evaluates each argument
+        // array exactly once. The string cast above has already run, so
+        // invoke_with_args only ever sees Float32/Float64 arrays here.
+        //
+        // Note this fallback also makes expr2 eager (invoke_with_args
+        // evaluates both arguments up front), so e.g.
+        // `nanvl(random(), 1 / 0)` under ANSI mode raises here even though
+        // Spark would not, since Spark only evaluates `1 / 0` on rows where
+        // `random()` is NaN (which never happens). Accepted as an edge
+        // case: a volatile expr1 paired with a fallible expr2 is unusual.
+        if expr1.is_volatile() {
+            return Ok(ExprSimplifyResult::Original(vec![expr1, expr2]));
+        }
+
         // Arrow/DataFusion comparison kernels use IEEE-754 totalOrder
         // semantics, under which NaN compares equal to itself, so
         // `expr1 != expr1` is never true for a NaN value coming from a
@@ -202,13 +206,24 @@ impl ScalarUDFImpl for SparkNanvl {
         let case_expr = when(is_nan, expr2).otherwise(expr1)?;
         Ok(ExprSimplifyResult::Simplified(case_expr))
     }
-
     // This eager path is used only for physical execution that bypasses
-    // the logical optimizer entirely (e.g. Comet). The normal DataFusion
-    // query engine always goes through `simplify()` above, which is also
-    // where STRING arguments are handled - this path does not support
-    // them.
+    // the logical optimizer entirely (e.g. Comet), or when `simplify()`
+    // falls back to `Original` for a volatile expr1 (the string cast has
+    // already been applied in that case, so this only ever needs to
+    // handle Float32/Float64). `return_type` reports Float64 for a Utf8
+    // input type so that a plan which reaches here directly (bypassing
+    // `simplify()`) still type-checks; this explicit check turns a
+    // mismatch at that point into a clear error instead of letting Arrow's
+    // `zip` kernel fail on a raw Utf8 array with a confusing message.
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        for arg in &args.args {
+            if !matches!(arg.data_type(), DataType::Float32 | DataType::Float64) {
+                return exec_err!(
+                    "nanvl expects Float32 or Float64 arguments at this point, got {}",
+                    arg.data_type()
+                );
+            }
+        }
         match args.args[0].data_type() {
             DataType::Float32 => {
                 make_scalar_function(spark_nanvl_f32, vec![])(&args.args)
