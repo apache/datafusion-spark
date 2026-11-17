@@ -389,6 +389,88 @@ SELECT pmod(arrow_cast(-10, 'Int64'), arrow_cast(3, 'Int64')) as pmod_int64_2;
 ----
 2
 
+# PMOD tests at the signed integer boundaries.
+# Spark evaluates `(r + n) % n` with Java arithmetic: `byte` and `short` are
+# promoted to `int` and never overflow, while `int` and `long` wrap around.
+query I
+SELECT pmod(arrow_cast(-1, 'Int32'), arrow_cast(-2147483648, 'Int32'));
+----
+2147483647
+
+query I
+SELECT pmod(arrow_cast(-2, 'Int32'), arrow_cast(-2147483648, 'Int32'));
+----
+2147483646
+
+query I
+SELECT pmod(arrow_cast(2147483647, 'Int32'), arrow_cast(-2147483648, 'Int32'));
+----
+2147483647
+
+query I
+SELECT pmod(arrow_cast(-2147483648, 'Int32'), arrow_cast(-1, 'Int32'));
+----
+0
+
+query I
+SELECT pmod(arrow_cast(-2147483648, 'Int32'), arrow_cast(3, 'Int32'));
+----
+1
+
+query I
+SELECT pmod(arrow_cast(-1, 'Int64'), arrow_cast(-9223372036854775808, 'Int64'));
+----
+9223372036854775807
+
+query I
+SELECT pmod(arrow_cast(-9223372036854775808, 'Int64'), arrow_cast(-1, 'Int64'));
+----
+0
+
+query I
+SELECT pmod(arrow_cast(2, 'Int64'), arrow_cast(9223372036854775807, 'Int64'));
+----
+2
+
+query I
+SELECT pmod(arrow_cast(-1, 'Int8'), arrow_cast(-128, 'Int8'));
+----
+-1
+
+query I
+SELECT pmod(arrow_cast(-128, 'Int8'), arrow_cast(-1, 'Int8'));
+----
+0
+
+query I
+SELECT pmod(arrow_cast(-1, 'Int16'), arrow_cast(-32768, 'Int16'));
+----
+-1
+
+query I
+SELECT pmod(arrow_cast(-32768, 'Int16'), arrow_cast(-1, 'Int16'));
+----
+0
+
+query I
+SELECT pmod(arrow_cast(128, 'Int16'), arrow_cast(-32768, 'Int16'));
+----
+128
+
+# The same boundary cases on array inputs
+query II
+SELECT a, pmod(a, arrow_cast(-2147483648, 'Int32')) FROM (VALUES
+  (arrow_cast(-1, 'Int32')),
+  (arrow_cast(-2, 'Int32')),
+  (arrow_cast(2147483647, 'Int32')),
+  (arrow_cast(NULL, 'Int32'))
+) AS t(a);
+----
+-1 2147483647
+-2 2147483646
+2147483647 2147483647
+NULL NULL
+
 # PMOD tests with unsigned integers
 query I
 SELECT pmod(arrow_cast(10, 'UInt8'), arrow_cast(3, 'UInt8')) as pmod_uint8_1;
