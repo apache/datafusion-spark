@@ -25,7 +25,9 @@ use datafusion_macros::user_doc;
         strings; this one also accepts binary. When both arguments are binary the match is on bytes. \
         When one argument is a string and the other is binary, both are compared as bytes, which is \
         the same as Spark casting the binary to a string. Integer, boolean and date arguments are \
-        cast to a string first. The match is case-sensitive, and an empty `right` is found in every \
+        cast to a string first. Other types are rejected at planning, including floating-point, \
+        decimal and timestamp arguments, which Spark casts to a string \
+        (see https://github.com/apache/datafusion-spark/issues/347). The match is case-sensitive, and an empty `right` is found in every \
         value, including an empty `left`. Returns NULL if either input is NULL.",
     syntax_example = "contains(left, right)",
     sql_example = r#"```sql

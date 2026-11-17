@@ -118,11 +118,30 @@ false
 
 ## Errors
 
-statement error
+statement error contains function requires 2 arguments
 SELECT contains('abc'::string);
 
-statement error
+statement error Spark `contains` function expects STRING or BINARY arguments
 SELECT contains(array('a'), 'a'::string);
+
+# Spark casts floating-point, decimal and timestamp arguments to a string, which
+# this version cannot do yet, so it rejects them.
+# https://github.com/apache/datafusion-spark/issues/347
+statement error Spark `contains` function expects STRING or BINARY arguments, got Float64
+SELECT contains(1.5::double, '.');
+
+# Spark 4.2.0 returns true for these
+# query BB
+# SELECT contains(1.5D, '.'), contains(TIMESTAMP '2024-01-01 00:00:00', ' ');
+# ----
+# true true
+
+# Spark 4.2.0 formats a DECIMAL as a string differently in the two ANSI modes, so this is
+# false with ANSI mode on and true with it off
+# query B
+# SELECT contains(CAST(0.0000001 AS DECIMAL(10,8)), 'E');
+# ----
+# false
 
 ## Arrow string and binary variants
 
