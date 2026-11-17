@@ -11,16 +11,20 @@
 //! for an argument that cannot be cast.
 //!
 //! A function here declares the same types with [`SparkInputType`], holds them in a
-//! [`SparkInputTypes`], and uses `Signature::user_defined`:
+//! [`SparkInputTypes`], and takes its signature from it:
 //!
 //! ```ignore
+//! fn signature(&self) -> &Signature {
+//!     self.input_types.signature()
+//! }
+//!
 //! fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
 //!     self.input_types.coerce(self.name(), arg_types)
 //! }
 //!
 //! fn with_updated_config(&self, config: &ConfigOptions) -> Option<ScalarUDF> {
 //!     let input_types = self.input_types.with_config(config)?;
-//!     Some(ScalarUDF::from(Self { input_types, ..self.clone() }))
+//!     Some(ScalarUDF::from(Self { input_types }))
 //! }
 //! ```
 //!
@@ -30,6 +34,7 @@
 use arrow::datatypes::{DataType, IntervalUnit};
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::{Result, plan_err};
+use datafusion_expr::{Signature, Volatility};
 
 /// A type that a Spark function declares for one of its arguments: a concrete Spark type,
 /// or one of Spark's abstract types such as `NumericType`.
@@ -79,15 +84,22 @@ pub(crate) enum SparkInputType {
 pub(crate) struct SparkInputTypes {
     types: Vec<SparkInputType>,
     ansi_mode: bool,
+    signature: Signature,
 }
 
 impl SparkInputTypes {
     /// Declares one input type per argument, with ANSI mode off.
-    pub(crate) fn new(types: Vec<SparkInputType>) -> Self {
+    pub(crate) fn new(types: Vec<SparkInputType>, volatility: Volatility) -> Self {
         Self {
             types,
             ansi_mode: false,
+            signature: Signature::user_defined(volatility),
         }
+    }
+
+    /// The function's `Signature`, which leaves coercion to [`Self::coerce`].
+    pub(crate) fn signature(&self) -> &Signature {
+        &self.signature
     }
 
     /// Returns the input types for `config`, or `None` when ANSI mode is unchanged.
@@ -97,8 +109,8 @@ impl SparkInputTypes {
     pub(crate) fn with_config(&self, config: &ConfigOptions) -> Option<Self> {
         let ansi_mode = config.execution.enable_ansi_mode;
         (ansi_mode != self.ansi_mode).then(|| Self {
-            types: self.types.clone(),
             ansi_mode,
+            ..self.clone()
         })
     }
 
@@ -156,11 +168,11 @@ impl SparkInputType {
             Long => matches!(data_type, DataType::Int64),
             Float => matches!(data_type, DataType::Float32),
             Double => matches!(data_type, DataType::Float64),
-            Numeric => is_numeric(data_type),
-            Integral => is_integral(data_type),
-            Decimal => is_decimal(data_type),
-            String => is_string(data_type),
-            Binary => is_binary(data_type),
+            Numeric => data_type.is_numeric(),
+            Integral => data_type.is_integer(),
+            Decimal => data_type.is_decimal(),
+            String => data_type.is_string(),
+            Binary => data_type.is_binary(),
             Array(element) => {
                 list_element(data_type).is_some_and(|item| element.accepts(item))
             }
@@ -192,19 +204,13 @@ impl SparkInputType {
     /// Whether this is a concrete Spark `AtomicType` (and not an abstract type).
     fn is_concrete_atomic(&self) -> bool {
         use SparkInputType::*;
-        matches!(
-            self,
-            Boolean | Byte | Short | Integer | Long | Float | Double | String | Binary
-        )
+        self.is_concrete_numeric() || matches!(self, Boolean | String | Binary)
     }
 
-    /// The concrete numeric type this declares, if it declares one.
-    fn concrete_numeric(&self) -> Option<DataType> {
+    /// Whether this is a concrete Spark `NumericType` (and not `Numeric` or `Decimal`).
+    fn is_concrete_numeric(&self) -> bool {
         use SparkInputType::*;
-        match self {
-            Byte | Short | Integer | Long | Float | Double => self.default_type(),
-            _ => None,
-        }
+        matches!(self, Byte | Short | Integer | Long | Float | Double)
     }
 
     /// The type as Spark's `toSQLType` writes it in an error message, with the quotes.
@@ -226,26 +232,29 @@ impl SparkInputType {
     fn simple_string(&self) -> String {
         use SparkInputType::*;
         match self {
-            Any => "ANY".to_string(),
-            Boolean => "BOOLEAN".to_string(),
-            Byte => "TINYINT".to_string(),
-            Short => "SMALLINT".to_string(),
-            Integer => "INT".to_string(),
-            Long => "BIGINT".to_string(),
-            Float => "FLOAT".to_string(),
-            Double => "DOUBLE".to_string(),
-            Numeric => "NUMERIC".to_string(),
-            Integral => "INTEGRAL".to_string(),
-            Decimal => "DECIMAL".to_string(),
-            String => "STRING".to_string(),
-            Binary => "BINARY".to_string(),
-            Array(element) => format!("ARRAY<{}>", element.simple_string()),
-            OneOf(types) => types
-                .iter()
-                .map(|t| t.simple_string())
-                .collect::<Vec<_>>()
-                .join(" or "),
+            Any => "ANY",
+            Boolean => "BOOLEAN",
+            Byte => "TINYINT",
+            Short => "SMALLINT",
+            Integer => "INT",
+            Long => "BIGINT",
+            Float => "FLOAT",
+            Double => "DOUBLE",
+            Numeric => "NUMERIC",
+            Integral => "INTEGRAL",
+            Decimal => "DECIMAL",
+            String => "STRING",
+            Binary => "BINARY",
+            Array(element) => return format!("ARRAY<{}>", element.simple_string()),
+            OneOf(types) => {
+                return types
+                    .iter()
+                    .map(|t| t.simple_string())
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+            }
         }
+        .to_string()
     }
 }
 
@@ -288,16 +297,16 @@ fn legacy_implicit_cast(from: &DataType, expected: &SparkInputType) -> Option<Da
     match (from, expected) {
         (DataType::Null, target) => target.default_type(),
         // Hive's convention: a string where any number is accepted becomes a DOUBLE.
-        (f, T::Numeric) if is_string(f) => Some(DataType::Float64),
-        (f, T::Decimal) if is_numeric(f) => decimal_for_type(f),
-        (f, target) if is_numeric(f) && target.concrete_numeric().is_some() => {
-            target.concrete_numeric()
+        (f, T::Numeric) if f.is_string() => Some(DataType::Float64),
+        (f, T::Decimal) if f.is_numeric() => decimal_for_type(f),
+        (f, target) if f.is_numeric() && target.is_concrete_numeric() => {
+            target.default_type()
         }
-        (f, T::Decimal) if is_string(f) => T::Decimal.default_type(),
-        (f, target) if is_string(f) && target.concrete_numeric().is_some() => {
-            target.concrete_numeric()
+        (f, T::Decimal) if f.is_string() => T::Decimal.default_type(),
+        (f, target) if f.is_string() && target.is_concrete_numeric() => {
+            target.default_type()
         }
-        (f, T::Binary) if is_string(f) => Some(binary_for_string(f)),
+        (f, T::Binary) if f.is_string() => Some(binary_for_string(f)),
         (f, T::String) if is_atomic(f) => Some(DataType::Utf8),
         (f, T::OneOf(types)) => types.iter().find_map(|t| implicit_cast(f, t, false)),
         (f, T::Array(element)) => {
@@ -312,19 +321,17 @@ fn legacy_implicit_cast(from: &DataType, expected: &SparkInputType) -> Option<Da
 fn ansi_implicit_cast(from: &DataType, expected: &SparkInputType) -> Option<DataType> {
     use SparkInputType as T;
     match (from, expected) {
-        (f, T::Decimal) if is_numeric(f) => decimal_for_type(f),
+        (f, T::Decimal) if f.is_numeric() => decimal_for_type(f),
         (f, T::Integral) if is_fractional(f) => None,
         // Spark allows a string to be cast to any primitive type, to keep existing queries
         // working, although `Cast.canANSIStoreAssign` does not.
+        (f, T::Binary) if f.is_string() => Some(binary_for_string(f)),
         (f, target)
-            if is_string(f)
+            if f.is_string()
                 && (target.is_concrete_atomic()
                     || matches!(target, T::Numeric | T::Decimal)) =>
         {
-            match target {
-                T::Binary => Some(binary_for_string(f)),
-                _ => target.default_type(),
-            }
+            target.default_type()
         }
         (f, T::Array(element)) if list_element(f).is_some() => {
             let item = list_element(f)?;
@@ -341,15 +348,15 @@ fn ansi_implicit_cast(from: &DataType, expected: &SparkInputType) -> Option<Data
 /// Spark's `Cast.canANSIStoreAssign`: whether a value of type `from` can be stored in a
 /// column of type `to` under ANSI rules.
 fn can_ansi_store_assign(from: &DataType, to: &DataType) -> bool {
+    if let (Some(from_item), Some(to_item)) = (list_element(from), list_element(to)) {
+        return can_ansi_store_assign(from_item, to_item);
+    }
     match (from, to) {
         _ if from == to => true,
         (DataType::Null, _) => true,
-        (f, t) if is_numeric(f) && is_numeric(t) => true,
-        (f, t) if is_string(t) && (is_atomic(f) || is_calendar_interval(f)) => true,
+        (f, t) if f.is_numeric() && t.is_numeric() => true,
+        (f, t) if t.is_string() && (is_atomic(f) || is_calendar_interval(f)) => true,
         (f, t) if is_datetime(f) && is_datetime(t) => true,
-        (f, t) if list_element(f).is_some() && list_element(t).is_some() => {
-            can_ansi_store_assign(list_element(f).unwrap(), list_element(t).unwrap())
-        }
         (DataType::Map(from_entries, _), DataType::Map(to_entries, _)) => {
             can_ansi_store_assign(from_entries.data_type(), to_entries.data_type())
         }
@@ -397,37 +404,9 @@ fn list_element(data_type: &DataType) -> Option<&DataType> {
     }
 }
 
-fn is_integral(data_type: &DataType) -> bool {
-    data_type.is_integer()
-}
-
+/// Spark's `FractionalType`: FLOAT, DOUBLE and DECIMAL.
 fn is_fractional(data_type: &DataType) -> bool {
-    data_type.is_floating() || is_decimal(data_type)
-}
-
-fn is_decimal(data_type: &DataType) -> bool {
-    data_type.is_decimal()
-}
-
-fn is_numeric(data_type: &DataType) -> bool {
-    data_type.is_numeric()
-}
-
-fn is_string(data_type: &DataType) -> bool {
-    matches!(
-        data_type,
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-    )
-}
-
-fn is_binary(data_type: &DataType) -> bool {
-    matches!(
-        data_type,
-        DataType::Binary
-            | DataType::LargeBinary
-            | DataType::BinaryView
-            | DataType::FixedSizeBinary(_)
-    )
+    data_type.is_floating() || data_type.is_decimal()
 }
 
 /// Spark's `DatetimeType`: DATE, TIMESTAMP, TIMESTAMP_NTZ and TIME.
@@ -455,9 +434,9 @@ fn is_atomic(data_type: &DataType) -> bool {
         DataType::Boolean
             | DataType::Interval(IntervalUnit::YearMonth | IntervalUnit::DayTime)
             | DataType::Duration(_)
-    ) || is_numeric(data_type)
-        || is_string(data_type)
-        || is_binary(data_type)
+    ) || data_type.is_numeric()
+        || data_type.is_string()
+        || data_type.is_binary()
         || is_datetime(data_type)
 }
 
@@ -488,8 +467,9 @@ fn spark_sql_type(data_type: &DataType) -> String {
         Int64 => "BIGINT".to_string(),
         Float32 => "FLOAT".to_string(),
         Float64 => "DOUBLE".to_string(),
-        Decimal32(p, s) | Decimal64(p, s) => format!("DECIMAL({p},{s})"),
-        Decimal128(p, s) | Decimal256(p, s) => format!("DECIMAL({p},{s})"),
+        Decimal32(p, s) | Decimal64(p, s) | Decimal128(p, s) | Decimal256(p, s) => {
+            format!("DECIMAL({p},{s})")
+        }
         Utf8 | LargeUtf8 | Utf8View => "STRING".to_string(),
         Binary | LargeBinary | BinaryView | FixedSizeBinary(_) => "BINARY".to_string(),
         Date32 | Date64 => "DATE".to_string(),
@@ -706,7 +686,8 @@ mod tests {
 
     #[test]
     fn coerce_reports_spark_errors() {
-        let types = SparkInputTypes::new(vec![T::Binary, T::Integer]);
+        let types =
+            SparkInputTypes::new(vec![T::Binary, T::Integer], Volatility::Immutable);
         assert_eq!(
             types
                 .coerce("sha2", &[DataType::Utf8, DataType::Int64])
@@ -739,7 +720,10 @@ mod tests {
             "{err}"
         );
 
-        let one_of = SparkInputTypes::new(vec![T::OneOf(vec![T::String, T::Binary])]);
+        let one_of = SparkInputTypes::new(
+            vec![T::OneOf(vec![T::String, T::Binary])],
+            Volatility::Immutable,
+        );
         let err = one_of
             .coerce("f", &[list(DataType::Int32)])
             .unwrap_err()
@@ -752,7 +736,7 @@ mod tests {
 
     #[test]
     fn with_config_follows_ansi_mode() {
-        let types = SparkInputTypes::new(vec![T::Boolean]);
+        let types = SparkInputTypes::new(vec![T::Boolean], Volatility::Immutable);
         let mut config = ConfigOptions::default();
         assert!(types.with_config(&config).is_none());
 

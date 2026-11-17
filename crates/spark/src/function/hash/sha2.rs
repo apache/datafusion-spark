@@ -45,9 +45,8 @@ NULL
         description = "SHA-2 variant: 224, 256, 384 or 512, cast to INT as in Spark. 0 is treated as 256. Any other value, or NULL, returns NULL."
     )
 )]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SparkSha2 {
-    signature: Signature,
     input_types: SparkInputTypes,
 }
 
@@ -60,12 +59,11 @@ impl Default for SparkSha2 {
 impl SparkSha2 {
     pub fn new() -> Self {
         Self {
-            signature: Signature::user_defined(Volatility::Immutable),
             // Spark's `Sha2.inputTypes`
-            input_types: SparkInputTypes::new(vec![
-                SparkInputType::Binary,
-                SparkInputType::Integer,
-            ]),
+            input_types: SparkInputTypes::new(
+                vec![SparkInputType::Binary, SparkInputType::Integer],
+                Volatility::Immutable,
+            ),
         }
     }
 }
@@ -76,7 +74,7 @@ impl ScalarUDFImpl for SparkSha2 {
     }
 
     fn signature(&self) -> &Signature {
-        &self.signature
+        self.input_types.signature()
     }
 
     fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
@@ -85,10 +83,7 @@ impl ScalarUDFImpl for SparkSha2 {
 
     fn with_updated_config(&self, config: &ConfigOptions) -> Option<ScalarUDF> {
         let input_types = self.input_types.with_config(config)?;
-        Some(ScalarUDF::from(Self {
-            input_types,
-            ..self.clone()
-        }))
+        Some(ScalarUDF::from(Self { input_types }))
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
