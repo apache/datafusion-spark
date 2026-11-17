@@ -130,18 +130,29 @@ SELECT contains(array('a'), 'a'::string);
 statement error Spark `contains` function expects STRING or BINARY arguments, got Float64
 SELECT contains(1.5::double, '.');
 
-# Spark 4.2.0 returns true for these
+# Spark 4.2.0 returns true for these in both ANSI modes
 # query BB
-# SELECT contains(1.5D, '.'), contains(TIMESTAMP '2024-01-01 00:00:00', ' ');
+# SELECT contains(1.5::double, '.'), contains(TIMESTAMP '2024-01-01 00:00:00', ' ');
 # ----
 # true true
 
-# Spark 4.2.0 formats a DECIMAL as a string differently in the two ANSI modes, so this is
-# false with ANSI mode on and true with it off
+# Spark 4.2.0 casts a DECIMAL to a string differently in the two ANSI modes. With ANSI
+# mode off it gives '1.0E-7' and with it on it gives '0.00000010'.
+# query B
+# SELECT contains(CAST(0.0000001 AS DECIMAL(10,8)), 'E');
+# ----
+# true
+#
+# statement ok
+# set datafusion.execution.enable_ansi_mode = true;
+#
 # query B
 # SELECT contains(CAST(0.0000001 AS DECIMAL(10,8)), 'E');
 # ----
 # false
+#
+# statement ok
+# set datafusion.execution.enable_ansi_mode = false;
 
 ## Arrow string and binary variants
 
