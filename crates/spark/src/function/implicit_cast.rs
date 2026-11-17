@@ -246,12 +246,17 @@ impl SparkInputType {
             String => "STRING",
             Binary => "BINARY",
             Array(element) => return format!("ARRAY<{}>", element.simple_string()),
+            // `toSQLType` upper-cases the whole `simpleString` of an abstract type, so a
+            // collection inside an array reads `ARRAY<(STRING OR BINARY)>`.
             OneOf(types) => {
-                return types
-                    .iter()
-                    .map(|t| t.simple_string())
-                    .collect::<Vec<_>>()
-                    .join(" or ");
+                return format!(
+                    "({})",
+                    types
+                        .iter()
+                        .map(|t| t.simple_string())
+                        .collect::<Vec<_>>()
+                        .join(" OR ")
+                );
             }
         }
         .to_string()
@@ -440,16 +445,15 @@ fn is_atomic(data_type: &DataType) -> bool {
         || is_datetime(data_type)
 }
 
-/// Spark's `ordinalNumber`, for "The first parameter ...".
+/// Spark's `ordinalNumber`, for "The first parameter ...". Spark spells out only the first
+/// three.
 fn ordinal_number(idx: usize) -> String {
-    const ORDINALS: [&str; 10] = [
-        "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth",
-        "ninth", "tenth",
-    ];
-    ORDINALS
-        .get(idx)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("{}th", idx + 1))
+    match idx {
+        0 => "first".to_string(),
+        1 => "second".to_string(),
+        2 => "third".to_string(),
+        _ => format!("{}th", idx + 1),
+    }
 }
 
 /// The name Spark's `toSQLType` gives a type, for error messages.
@@ -752,7 +756,19 @@ mod tests {
     #[test]
     fn ordinals() {
         assert_eq!(ordinal_number(0), "first");
-        assert_eq!(ordinal_number(9), "tenth");
+        assert_eq!(ordinal_number(2), "third");
+        assert_eq!(ordinal_number(3), "4th");
         assert_eq!(ordinal_number(10), "11th");
+    }
+
+    #[test]
+    fn type_names_match_to_sql_type() {
+        let string_or_binary = T::OneOf(vec![T::String, T::Binary]);
+        assert_eq!(string_or_binary.sql(), "(\"STRING\" or \"BINARY\")");
+        assert_eq!(
+            T::Array(Box::new(string_or_binary)).sql(),
+            "\"ARRAY<(STRING OR BINARY)>\""
+        );
+        assert_eq!(T::Array(Box::new(T::Long)).sql(), "\"ARRAY<BIGINT>\"");
     }
 }
