@@ -649,6 +649,16 @@ SELECT hash(make_interval(0, 0, 0, CAST(d AS INT))) FROM (VALUES (0), (1)) AS t(
 1081828689
 1081828689
 
+# DataFusion types the literal INTERVAL '1' DAY as Interval(MonthDayNano), so it
+# takes the calendar-interval path above and hashes like a zero interval. Spark
+# 4.2.0 types it as a day-time interval and returns 892267096, the Duration case
+# above, so the PySpark runner skips this record.
+skipif spark
+query II
+SELECT hash(INTERVAL '1' DAY), hash(make_interval(0, 0, 0, 0));
+----
+1081828689 1081828689
+
 # Spark requires at least one argument
 statement error does not support zero arguments
 SELECT hash();

@@ -32,7 +32,12 @@ const DEFAULT_SEED: u32 = 42;
         and integer literals are BIGINT in DataFusion but INT in Spark, so cast them to INT to match Spark's results. \
         `-0.0` hashes like `0.0`, and every NaN hashes like the canonical NaN. Dates hash as INT days and \
         timestamps as BIGINT microseconds, whatever the Arrow unit (DataFusion's TIMESTAMP literals are \
-        nanoseconds, floored to microseconds). Decimals with precision up to 18 hash as their unscaled long, and wider decimals hash \
+        nanoseconds, floored to microseconds). TIME hashes as BIGINT nanoseconds since midnight, a year-month \
+        interval (`Interval(YearMonth)`) as INT months and a day-time interval (`Duration(Microsecond)`) as BIGINT \
+        microseconds. A calendar interval (`Interval(MonthDayNano)`) hashes its microseconds and then its months, \
+        and leaves out its days, as Spark 4.2's generated code does (Spark 4.3 includes the days, see SPARK-58236). \
+        DataFusion types `INTERVAL '1' DAY` as a calendar interval, so it hashes like a zero interval, where Spark \
+        hashes it as a day-time interval. Use `arrow_cast(86400000000, 'Duration(Microsecond)')` to match Spark. Decimals with precision up to 18 hash as their unscaled long, and wider decimals hash \
         the minimal big-endian two's complement bytes of the unscaled value. Lists hash each element in order \
         (nested lists flatten into the same chain, and an empty list leaves the seed unchanged), structs hash each field, \
         and maps hash each key then its value. This crate hashes maps as if Spark's `spark.sql.legacy.allowHashOnMapType` \
