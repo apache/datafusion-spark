@@ -863,7 +863,7 @@ macro_rules! hash_list_array {
 macro_rules! create_hashes_internal {
     ($arrays: ident, $hashes_buffer: ident, $hash_method: ident, $create_dictionary_hash_method: ident, $recursive_hash_method: ident) => {
         use arrow::array::{types::*, *};
-        use arrow::datatypes::{DataType, TimeUnit};
+        use arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
         use datafusion_common::DataFusionError;
 
         for (i, col) in $arrays.iter().enumerate() {
@@ -989,6 +989,58 @@ macro_rules! create_hashes_internal {
                         },
                         $hash_method,
                     )?;
+                }
+                DataType::Time64(TimeUnit::Nanosecond) => {
+                    $crate::hash_array_primitive!(
+                        Time64NanosecondArray,
+                        col,
+                        i64,
+                        $hashes_buffer,
+                        $hash_method
+                    );
+                }
+                DataType::Interval(IntervalUnit::MonthDayNano) => {
+                    // Spark 4.2's generated code hashes the microseconds and then
+                    // the months, and leaves out the days field:
+                    // https://github.com/apache/spark/blob/v4.2.0/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/hash.scala#L428-L431
+                    // SPARK-58236 includes the days from Spark 4.3. Spark's
+                    // CalendarInterval is in microseconds, so the nanoseconds are
+                    // a whole number of microseconds. Hashing every row with the
+                    // microseconds and then every row with the months chains the
+                    // two per row, as Spark does.
+                    let array = $crate::downcast_array!(col, IntervalMonthDayNanoArray);
+                    $crate::function::hash::utils::hash_primitive_values(
+                        array,
+                        $hashes_buffer,
+                        |v| (v.nanoseconds / 1_000).to_le_bytes(),
+                        $hash_method,
+                    );
+                    $crate::function::hash::utils::hash_primitive_values(
+                        array,
+                        $hashes_buffer,
+                        |v| v.months.to_le_bytes(),
+                        $hash_method,
+                    );
+                }
+                // Spark hashes YearMonthIntervalType as an INT and
+                // DayTimeIntervalType as a BIGINT.
+                DataType::Interval(IntervalUnit::YearMonth) => {
+                    $crate::hash_array_primitive!(
+                        IntervalYearMonthArray,
+                        col,
+                        i32,
+                        $hashes_buffer,
+                        $hash_method
+                    );
+                }
+                DataType::Duration(TimeUnit::Microsecond) => {
+                    $crate::hash_array_primitive!(
+                        DurationMicrosecondArray,
+                        col,
+                        i64,
+                        $hashes_buffer,
+                        $hash_method
+                    );
                 }
                 DataType::Utf8 => {
                     $crate::hash_array!(StringArray, col, $hashes_buffer, $hash_method);

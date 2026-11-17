@@ -581,6 +581,74 @@ SELECT hash(column2) FROM hash_t;
 -1808790533
 42
 
+# Column inputs with NULL rows, which take the null-aware loops
+query I
+SELECT hash(column1) FROM (VALUES ([CAST(1 AS INT), CAST(2 AS INT)]), (NULL), ([NULL, CAST(3 AS INT)]), (arrow_cast([], 'List(Int32)')));
+----
+-222940379
+42
+-1823081949
+42
+
+query I
+SELECT hash(column1) FROM (VALUES ([[CAST(1 AS INT), CAST(2 AS INT)], [CAST(3 AS INT)]]), ([arrow_cast(NULL, 'List(Int32)')]), (NULL));
+----
+-912918097
+42
+42
+
+query I
+SELECT hash(CASE WHEN i = 2 THEN NULL ELSE named_struct('a', i, 'b', CAST(i AS VARCHAR)) END)
+FROM (SELECT CAST(column1 AS INT) AS i FROM (VALUES (1), (2), (3)));
+----
+-1161632238
+42
+2015795020
+
+query I
+SELECT hash(CASE WHEN i = 2 THEN NULL ELSE map([i], [CAST(i AS VARCHAR)]) END)
+FROM (SELECT CAST(column1 AS INT) AS i FROM (VALUES (1), (2), (3)));
+----
+-1161632238
+42
+2015795020
+
+# TIME is hashed as nanoseconds since midnight
+query I
+SELECT hash(TIME '12:00:00');
+----
+-1984942870
+
+# Spark's day-time interval is Duration(Microsecond) in Arrow and is hashed as a
+# BIGINT. DataFusion reads the literal INTERVAL '1' DAY as a calendar interval,
+# so the Duration is built with arrow_cast. Spark 4.2.0: hash(INTERVAL '1' DAY).
+query I
+SELECT hash(arrow_cast(86400000000, 'Duration(Microsecond)'));
+----
+892267096
+
+# Spark's year-month interval is Interval(YearMonth) and is hashed as an INT.
+# Spark 4.2.0: hash(INTERVAL '14' MONTH).
+query I
+SELECT hash(arrow_cast('1 year 2 months', 'Interval(YearMonth)'));
+----
+335551368
+
+# A calendar interval (Interval(MonthDayNano), from make_interval) is hashed as
+# Spark 4.2.0's generated code does: the microseconds, then the months, without
+# the days. So 0 and 1 days hash alike, as they do in Spark over a column, for
+# example hash(make_interval(0, 0, 0, CAST(id AS INT))) FROM range(2). Spark's
+# interpreted path, which it uses to constant-fold a literal, includes the days
+# and gives other values. SPARK-58236 includes the days from Spark 4.3. Spark
+# folds these VALUES rows with the interpreted path, so the PySpark runner skips
+# this record.
+skipif spark
+query I
+SELECT hash(make_interval(0, 0, 0, CAST(d AS INT))) FROM (VALUES (0), (1)) AS t(d);
+----
+1081828689
+1081828689
+
 # Spark requires at least one argument
 statement error does not support zero arguments
 SELECT hash();

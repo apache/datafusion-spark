@@ -388,3 +388,11 @@ SELECT xxhash64([-CAST('NaN' AS FLOAT)]);
 # Spark requires at least one argument
 statement error does not support zero arguments
 SELECT xxhash64();
+
+# TIME and Spark's interval types. The intervals are built with arrow_cast, since
+# DataFusion reads INTERVAL literals as calendar intervals. Spark 4.2.0:
+# xxhash64(TIME '12:00:00'), xxhash64(INTERVAL '1' DAY), xxhash64(INTERVAL '14' MONTH).
+query III
+SELECT xxhash64(TIME '12:00:00'), xxhash64(arrow_cast(86400000000, 'Duration(Microsecond)')), xxhash64(arrow_cast('1 year 2 months', 'Interval(YearMonth)'));
+----
+7141818012718557382 5650310968337874586 -3715488255824917081
