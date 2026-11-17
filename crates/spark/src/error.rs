@@ -24,9 +24,9 @@ use datafusion_common::DataFusionError;
 /// messages, and 4.0 dropped it.
 /// Spark quotes values and types in the forms its `toSQLValue` and `toSQLType`
 /// produce. The caller passes them already formatted, such as `2147483648L`,
-/// `NaN`, or `'abc'` from [`SparkError::sql_string`], and `"BIGINT"` without the
-/// quotes, since only the caller knows the Spark type. Every message ends with
-/// the error's SQLSTATE, as Spark's do.
+/// `NaN`, or `'abc'` with its quotes, and `"BIGINT"` without the quotes, since
+/// only the caller knows the Spark type. Every message ends with the error's
+/// SQLSTATE, as Spark's do.
 ///
 /// The variants are `#[non_exhaustive]` so that fields can be added later.
 /// Code outside this crate matches them with `..`.
@@ -97,12 +97,6 @@ impl SparkError {
             | Self::NumericValueOutOfRange { .. }
             | Self::NumericOutOfSupportedRange { .. } => "22003",
         }
-    }
-
-    /// A string value as Spark's `toSQLValue` renders it in a message: quoted,
-    /// with backslashes and quotes escaped, so `a'b` becomes `'a\'b'`.
-    pub fn sql_string(value: &str) -> String {
-        format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
     }
 
     /// Finds a `SparkError` in `error`, looking through the
@@ -207,7 +201,7 @@ mod tests {
              instead. SQLSTATE: 22003"
         );
         let invalid = SparkError::CastInvalidValue {
-            value: SparkError::sql_string("abc"),
+            value: "'abc'".to_string(),
             from_type: "STRING".to_string(),
             to_type: "INT".to_string(),
         };
@@ -219,7 +213,7 @@ mod tests {
              SQLSTATE: 22018"
         );
         let datetime = SparkError::InvalidInputInCastToDatetime {
-            value: SparkError::sql_string("abc"),
+            value: "'abc'".to_string(),
             from_type: "STRING".to_string(),
             to_type: "DATE".to_string(),
         };
@@ -250,12 +244,10 @@ mod tests {
         );
     }
 
-    /// Spark's `toSQLValue` for strings, and a double, which it leaves unquoted.
+    /// The message uses the value as given, so a double that Spark's
+    /// `toSQLValue` leaves unquoted, such as `NaN`, stays unquoted.
     #[test]
     fn test_values_are_formatted_by_the_caller() {
-        assert_eq!(SparkError::sql_string("abc"), "'abc'");
-        assert_eq!(SparkError::sql_string("a'b"), r"'a\'b'");
-        assert_eq!(SparkError::sql_string(r"a\b"), r"'a\\b'");
         let nan = SparkError::InvalidInputInCastToDatetime {
             value: "NaN".to_string(),
             from_type: "DOUBLE".to_string(),
