@@ -213,6 +213,9 @@ pub(crate) fn cast_array(
         }
         // Spark replaces invalid UTF-8, and Arrow raises an error.
         (Binary, Utf8) => not_yet_ported(from_type, to_type, eval_mode),
+        // LEGACY returns NULL and ANSI rejects the cast, while Arrow reinterprets
+        // the days since the epoch.
+        (Date32, Int32) => not_yet_ported(from_type, to_type, eval_mode),
 
         _ if is_datafusion_spark_compatible(from_type, to_type) => arrow_cast(&array),
         _ => not_supported(from_type, to_type),
@@ -261,8 +264,7 @@ fn is_datafusion_spark_compatible(from_type: &DataType, to_type: &DataType) -> b
             Int8 | Int16 | Int32 | Int64 | Decimal128(_, _) | Decimal256(_, _) | Utf8
         ),
         Utf8 => matches!(to_type, Binary),
-        // Arrow reinterprets the days since the epoch, as Spark does.
-        Date32 => matches!(to_type, Int32 | Utf8),
+        Date32 => matches!(to_type, Utf8),
         // The instant is unchanged, so Arrow only replaces the time zone.
         Timestamp(_, Some(_)) => matches!(to_type, Timestamp(_, Some(_))),
         Timestamp(_, None) => matches!(to_type, Date32),
@@ -335,6 +337,22 @@ mod tests {
                 .contains("cast from Utf8 to Int32 is not supported"),
             "{error}"
         );
+    }
+
+    /// Arrow reinterprets the days since the epoch, while Spark returns NULL
+    /// (LEGACY) or rejects the cast (ANSI), so DATE to INT is not ported yet.
+    #[test]
+    fn test_date_to_int_is_not_reinterpreted() {
+        let array: ArrayRef = Arc::new(arrow::array::Date32Array::from(vec![18262]));
+        for eval_mode in [EvalMode::Legacy, EvalMode::Ansi, EvalMode::Try] {
+            let error = cast_array(
+                Arc::clone(&array),
+                &DataType::Int32,
+                &SparkCastOptions::new(eval_mode),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("not implemented yet"), "{error}");
+        }
     }
 
     /// A cast whose Spark-compatible implementation has not been ported must
