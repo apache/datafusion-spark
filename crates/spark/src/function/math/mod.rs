@@ -9,6 +9,7 @@ pub mod atan2;
 pub mod bin;
 pub mod bround;
 pub mod ceil;
+pub mod divide;
 pub mod expm1;
 pub mod factorial;
 pub mod floor;
@@ -50,6 +51,7 @@ make_udf_function!(trigonometry::SparkSec, sec);
 make_udf_function!(negative::SparkNegative, negative);
 make_udf_function!(bin::SparkBin, bin);
 make_udf_function!(bround::SparkBRound, bround);
+make_udf_function!(divide::SparkDivide, spark_divide);
 make_udf_function!(log1p::SparkLog1p, log1p);
 
 pub mod expr_fn {
@@ -134,6 +136,7 @@ pub fn functions() -> Vec<Arc<ScalarUDF>> {
         positive(),
         bin(),
         bround(),
+        spark_divide(),
         log1p(),
     ]
 }
