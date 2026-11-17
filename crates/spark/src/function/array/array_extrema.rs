@@ -12,8 +12,8 @@ use arrow::array::{
 };
 use arrow::compute::{SortOptions, take};
 use arrow::datatypes::{
-    DataType, Date32Type, Decimal128Type, Field, Float32Type, Float64Type, Int8Type,
-    Int16Type, Int32Type, Int64Type, TimeUnit, TimestampMicrosecondType,
+    DataType, Date32Type, Decimal128Type, Field, FieldRef, Float32Type, Float64Type,
+    Int8Type, Int16Type, Int32Type, Int64Type, TimeUnit, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
 };
 use datafusion_common::utils::take_function_args;
@@ -178,14 +178,17 @@ fn element_type(name: &str, arg_types: &[DataType]) -> Result<DataType> {
 }
 
 /// Accepts the argument types that Spark's `ArrayMax` and `ArrayMin` accept: an array of an
-/// orderable type, or NULL. Fixed-size lists are cast to lists.
+/// orderable type, or NULL. Fixed-size lists are cast to lists, and dictionary-encoded
+/// elements to their value type.
 fn coerce_array(name: &str, arg_types: &[DataType]) -> Result<Vec<DataType>> {
     let [array] = take_function_args(name, arg_types)?;
     let coerced = match array {
-        DataType::Null | DataType::List(_) | DataType::LargeList(_) => array.clone(),
+        DataType::Null => DataType::Null,
+        DataType::List(field) => DataType::List(decode_field(field)),
+        DataType::LargeList(field) => DataType::LargeList(decode_field(field)),
         DataType::FixedSizeList(field, _) => DataType::List(Arc::new(Field::new(
             field.name(),
-            field.data_type().clone(),
+            decode_dictionaries(field.data_type()),
             true,
         ))),
         other => return unexpected_input_type(name, other),
@@ -199,6 +202,34 @@ fn coerce_array(name: &str, arg_types: &[DataType]) -> Result<Vec<DataType>> {
         );
     }
     Ok(vec![coerced])
+}
+
+/// Replaces every dictionary type, at any depth of list and struct, with its value type.
+/// Spark has no dictionary types, but engines built on these functions pass
+/// dictionary-encoded columns. The typed path and the float normalization of the generic
+/// path do not look inside dictionaries, so `-0.0` would otherwise order below `0.0`.
+fn decode_dictionaries(data_type: &DataType) -> DataType {
+    match data_type {
+        DataType::Dictionary(_, value) => decode_dictionaries(value),
+        DataType::List(field) => DataType::List(decode_field(field)),
+        DataType::LargeList(field) => DataType::LargeList(decode_field(field)),
+        DataType::FixedSizeList(field, size) => {
+            DataType::FixedSizeList(decode_field(field), *size)
+        }
+        DataType::Struct(fields) => {
+            DataType::Struct(fields.iter().map(decode_field).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+fn decode_field(field: &FieldRef) -> FieldRef {
+    Arc::new(
+        field
+            .as_ref()
+            .clone()
+            .with_data_type(decode_dictionaries(field.data_type())),
+    )
 }
 
 fn unexpected_input_type<T>(name: &str, data_type: &DataType) -> Result<T> {

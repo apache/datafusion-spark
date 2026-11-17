@@ -193,6 +193,28 @@ NaN 1.5 NaN 1.5
 0 0 -0.0 -0.0
 0 0 0.0 0.0
 
+# Spark has no dictionary types. Dictionary-encoded elements, also inside nested arrays and
+# structs, compare as their values, so -0.0 equals 0.0 and the first of them is returned.
+query TTTT
+SELECT CAST(array_max(arrow_cast(array(CAST('-0.0' AS DOUBLE), CAST(0.0 AS DOUBLE)), 'List(Dictionary(Int32, Float64))')) AS STRING),
+       CAST(array_min(arrow_cast(array(CAST(0.0 AS DOUBLE), CAST('-0.0' AS DOUBLE)), 'List(Dictionary(Int32, Float64))')) AS STRING),
+       CAST(array_max(arrow_cast(array(CAST(NULL AS DOUBLE), CAST('NaN' AS DOUBLE), CAST(1.0 AS DOUBLE)), 'LargeList(Dictionary(Int8, Float64))')) AS STRING),
+       CAST(array_min(arrow_cast(array(CAST(0.0 AS FLOAT), CAST('-0.0' AS FLOAT)), 'FixedSizeList(2, Dictionary(Int32, Float32))')) AS STRING);
+----
+-0.0 0.0 NaN 0.0
+
+query ??
+SELECT array_max(arrow_cast(array(array(CAST('-0.0' AS DOUBLE)), array(CAST(0.0 AS DOUBLE))), 'List(List(Dictionary(Int32, Float64)))')),
+       array_max(arrow_cast(array(named_struct('a', CAST('-0.0' AS DOUBLE)), named_struct('a', CAST(0.0 AS DOUBLE))), 'List(Struct("a": Dictionary(Int32, Float64)))'));
+----
+[-0.0] {a: -0.0}
+
+query TT
+SELECT array_max(arrow_cast(array('b', NULL, 'c', 'a'), 'List(Dictionary(Int32, Utf8))')),
+       array_min(arrow_cast(array('b', NULL, 'c', 'a'), 'List(Dictionary(Int32, Utf8))'));
+----
+c a
+
 # Maps cannot be ordered, at any depth. DataFusion's built-in fails at execution instead.
 query error \[DATATYPE_MISMATCH\.INVALID_ORDERING_TYPE\] The `array_max` does not support ordering on type "MAP<BIGINT, BIGINT>"\. SQLSTATE: 42K09
 SELECT array_max(array(map(1, 2)));
