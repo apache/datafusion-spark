@@ -253,17 +253,13 @@ impl SparkInputType {
 /// if Spark does not cast it.
 ///
 /// A port of the private `implicitCast(DataType, AbstractDataType)` in Spark's
-/// `TypeCoercion` (ANSI mode off) and `AnsiTypeCoercion` (ANSI mode on). Spark has no
-/// dictionary types, so a dictionary argument has the type of its values (see #349).
+/// `TypeCoercion` (ANSI mode off) and `AnsiTypeCoercion` (ANSI mode on).
 fn implicit_cast(
     from: &DataType,
     expected: &SparkInputType,
     ansi_mode: bool,
 ) -> Option<DataType> {
-    let from = match from {
-        DataType::Dictionary(_, value) => value.as_ref(),
-        other => other,
-    };
+    let from = &spark_layout(from);
     if expected.accepts(from) {
         return Some(from.clone());
     }
@@ -271,6 +267,18 @@ fn implicit_cast(
         ansi_implicit_cast(from, expected)
     } else {
         legacy_implicit_cast(from, expected)
+    }
+}
+
+/// The layout a function receives for an argument of a type Spark does not have.
+///
+/// A dictionary has the type of its values (see #349), and a fixed-size binary becomes
+/// BINARY, so that a function only has to handle the layouts of Spark's own types.
+fn spark_layout(data_type: &DataType) -> DataType {
+    match data_type {
+        DataType::Dictionary(_, value) => spark_layout(value),
+        DataType::FixedSizeBinary(_) => DataType::Binary,
+        other => other.clone(),
     }
 }
 
@@ -682,6 +690,18 @@ mod tests {
             DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
         assert_eq!(cast(dict.clone(), T::String), both(DataType::Utf8));
         assert_eq!(cast(dict, T::Binary), both(DataType::Binary));
+    }
+
+    #[test]
+    fn fixed_size_binary_becomes_binary() {
+        assert_eq!(
+            cast(DataType::FixedSizeBinary(5), T::Binary),
+            both(DataType::Binary)
+        );
+        assert_eq!(
+            cast(DataType::FixedSizeBinary(5), T::String),
+            both(DataType::Utf8)
+        );
     }
 
     #[test]

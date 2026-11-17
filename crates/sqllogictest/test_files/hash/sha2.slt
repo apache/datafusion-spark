@@ -166,6 +166,18 @@ SELECT sha2(arrow_cast('Spark', 'Dictionary(Int32, Utf8)'), 256);
 ----
 529bc3b07127ecb7e53a4dcf1991d9152c24537d919178022b2c42657f79a26b
 
+# Spark has no fixed-size binary, so it is cast to BINARY
+query T
+SELECT sha2(arrow_cast(X'537061726b', 'FixedSizeBinary(5)'), 256);
+----
+529bc3b07127ecb7e53a4dcf1991d9152c24537d919178022b2c42657f79a26b
+
+query T
+SELECT sha2(c, 256) FROM (VALUES (arrow_cast(X'537061726b', 'FixedSizeBinary(5)')), (arrow_cast(X'666f6f2062', 'FixedSizeBinary(5)'))) AS t(c);
+----
+529bc3b07127ecb7e53a4dcf1991d9152c24537d919178022b2c42657f79a26b
+bf83b9ea169e80880e11056e2e3e7624635321a1d3805fbc5e62e82fc2568b05
+
 query error \[DATATYPE_MISMATCH\.UNEXPECTED_INPUT_TYPE\] The first parameter of `sha2` requires the "BINARY" type, however it has the type "INT"\. SQLSTATE: 42K09
 SELECT sha2(1::INT, 256);
 

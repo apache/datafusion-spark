@@ -17,9 +17,9 @@ use datafusion_expr::{
 use datafusion_functions::utils::make_scalar_function;
 use datafusion_macros::user_doc;
 use sha2::{self, Digest};
+use std::sync::Arc;
 
 use crate::function::implicit_cast::{SparkInputType, SparkInputTypes};
-use std::sync::Arc;
 
 /// Spark-compatible `sha2` expression.
 ///
@@ -42,7 +42,7 @@ NULL
     ),
     argument(
         name = "bit_length",
-        description = "Integer SHA-2 variant: 224, 256, 384 or 512. 0 is treated as 256. Any other value, or NULL, returns NULL."
+        description = "SHA-2 variant: 224, 256, 384 or 512, cast to INT as in Spark. 0 is treated as 256. Any other value, or NULL, returns NULL."
     )
 )]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -318,4 +318,24 @@ where
         StringArray::new_unchecked(offsets, values, nulls)
     };
     Arc::new(str_array)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ansi_mode_reaches_coercion() {
+        let mut config = ConfigOptions::default();
+        assert!(SparkSha2::new().with_updated_config(&config).is_none());
+
+        config.execution.enable_ansi_mode = true;
+        let ansi = SparkSha2::new().with_updated_config(&config).unwrap();
+        assert_eq!(
+            ansi.coerce_types(&[DataType::Utf8, DataType::Utf8])
+                .unwrap(),
+            vec![DataType::Binary, DataType::Int32]
+        );
+        assert!(ansi.inner().with_updated_config(&config).is_none());
+    }
 }
