@@ -32,8 +32,8 @@ const ARITHMETIC_OVERFLOW_ERROR: &str = r#"[ARITHMETIC_OVERFLOW] overflow. If ne
         ARITHMETIC_OVERFLOW in both modes, as in Spark. Other numeric and string inputs are cast \
         to INT first, which truncates fractions and raises an error if the value is out of the \
         INT range or is not a valid number. These errors match Spark with ANSI mode enabled. \
-        With ANSI mode disabled, Spark wraps an out-of-range BIGINT, returns NULL for a \
-        malformed string, an infinite DOUBLE or a DECIMAL out of the INT range, and casts NaN \
+        With ANSI mode disabled, Spark wraps an out-of-range BIGINT or DECIMAL, returns NULL \
+        for a malformed string or a floating-point value out of the INT range, and casts NaN \
         to 0, while this function still errors (see \
         https://github.com/apache/datafusion-spark/issues/88). Returns NULL if any input is \
         NULL. DataFusion's built-in `make_date` differs: it raises an error for an invalid \

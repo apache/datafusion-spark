@@ -122,8 +122,8 @@ SELECT make_date('2024', '2', '3');
 # ----
 # NULL
 
-# Spark 4.2.0 casts NaN to 0 when ANSI mode is off, and returns NULL for an infinite
-# DOUBLE or a DECIMAL out of the INT range; DataFusion errors
+# When ANSI mode is off, Spark 4.2.0 casts NaN to 0, and saturates a DOUBLE out of the
+# INT range to 2147483647 (never a valid year, so NULL); DataFusion errors
 # https://github.com/apache/datafusion-spark/issues/88
 # query D
 # SELECT make_date(CAST('NaN' AS DOUBLE), 1, 1);
@@ -134,6 +134,20 @@ SELECT make_date('2024', '2', '3');
 # SELECT make_date(CAST('Infinity' AS DOUBLE), 1, 1);
 # ----
 # NULL
+#
+# query D
+# SELECT make_date(CAST(1e10 AS DOUBLE), 1, 1);
+# ----
+# NULL
+
+# When ANSI mode is off, Spark 4.2.0 wraps an out-of-range DECIMAL to INT like a BIGINT
+# (toLong.toInt): 4294969320 wraps to 2024, while 99999999999 wraps to 1215752191, an
+# invalid year; DataFusion errors
+# https://github.com/apache/datafusion-spark/issues/88
+# query D
+# SELECT make_date(CAST(4294969320 AS DECIMAL(20,0)), 1, 1);
+# ----
+# 2024-01-01
 #
 # query D
 # SELECT make_date(CAST(99999999999 AS DECIMAL(20,0)), 1, 1);
