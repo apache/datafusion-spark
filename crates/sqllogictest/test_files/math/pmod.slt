@@ -471,6 +471,47 @@ SELECT a, pmod(a, arrow_cast(-2147483648, 'Int32')) FROM (VALUES
 2147483647 2147483647
 NULL NULL
 
+# Spark's Pmod uses plain `+` and `%` in ANSI mode too, not `Math.addExact`,
+# so the boundary cases wrap instead of raising an overflow error
+statement ok
+set datafusion.execution.enable_ansi_mode = true;
+
+query I
+SELECT pmod(arrow_cast(-1, 'Int32'), arrow_cast(-2147483648, 'Int32'));
+----
+2147483647
+
+query I
+SELECT pmod(arrow_cast(-1, 'Int64'), arrow_cast(-9223372036854775808, 'Int64'));
+----
+9223372036854775807
+
+query I
+SELECT pmod(arrow_cast(-1, 'Int8'), arrow_cast(-128, 'Int8'));
+----
+-1
+
+query I
+SELECT pmod(arrow_cast(-1, 'Int16'), arrow_cast(-32768, 'Int16'));
+----
+-1
+
+query II
+SELECT a, pmod(a, arrow_cast(-2147483648, 'Int32')) FROM (VALUES
+  (arrow_cast(-1, 'Int32')),
+  (arrow_cast(-2, 'Int32')),
+  (arrow_cast(2147483647, 'Int32')),
+  (arrow_cast(NULL, 'Int32'))
+) AS t(a);
+----
+-1 2147483647
+-2 2147483646
+2147483647 2147483647
+NULL NULL
+
+statement ok
+set datafusion.execution.enable_ansi_mode = false;
+
 # PMOD tests with unsigned integers
 query I
 SELECT pmod(arrow_cast(10, 'UInt8'), arrow_cast(3, 'UInt8')) as pmod_uint8_1;
