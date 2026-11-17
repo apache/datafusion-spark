@@ -14,6 +14,7 @@ pub mod factorial;
 pub mod floor;
 pub mod hex;
 pub mod hypot;
+pub mod log1p;
 pub mod modulus;
 pub mod negative;
 pub mod positive;
@@ -49,6 +50,7 @@ make_udf_function!(trigonometry::SparkSec, sec);
 make_udf_function!(negative::SparkNegative, negative);
 make_udf_function!(bin::SparkBin, bin);
 make_udf_function!(bround::SparkBRound, bround);
+make_udf_function!(log1p::SparkLog1p, log1p);
 
 pub mod expr_fn {
     use datafusion_functions::export_functions;
@@ -102,6 +104,11 @@ pub mod expr_fn {
         "Rounds the value of expr to scale decimal places using HALF_EVEN rounding mode.",
         arg1 arg2
     ));
+    export_functions!((
+        log1p,
+        "Returns the natural logarithm of 1 plus the given value, computed accurately for values near zero. Returns NULL when the input is less than or equal to -1.",
+        arg1
+    ));
 }
 
 pub fn functions() -> Vec<Arc<ScalarUDF>> {
@@ -127,5 +134,6 @@ pub fn functions() -> Vec<Arc<ScalarUDF>> {
         positive(),
         bin(),
         bround(),
+        log1p(),
     ]
 }
