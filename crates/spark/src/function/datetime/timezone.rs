@@ -229,13 +229,15 @@ fn region_offset_at_local(tz: &Tz, local: NaiveDateTime) -> i32 {
         }
         LocalResult::None => None,
     };
-    offset_of(tz.from_local_datetime(&local))
+    offset_of(tz.from_local_datetime(&local)).unwrap_or_else(|| {
         // In a gap, apply the offset in effect before it, which moves the time
-        // forward by the length of the gap.
-        .or_else(|| {
-            offset_of(tz.from_local_datetime(&(local - chrono::Duration::hours(3))))
-        })
-        .unwrap_or(0)
+        // forward by the length of the gap. No zone is more than 14 hours ahead
+        // of UTC after a transition, so `local - 14h`, read as UTC, is an instant
+        // before the transition, even in a gap that skips a whole day.
+        tz.offset_from_utc_datetime(&(local - chrono::Duration::hours(14)))
+            .fix()
+            .local_minus_utc()
+    })
 }
 
 /// Parses Java's signed offsets after Spark's single-digit hour/minute normalization.
@@ -371,6 +373,29 @@ mod tests {
             .unwrap()
             .adjust_to_local_time::<TimestampMicrosecondType>(timestamp)
             .unwrap()
+    }
+
+    /// Local times in a gap move forward by the length of the gap, as Java's
+    /// `LocalDateTime.atZone` does. Expected values from Spark 4.2.0's
+    /// `CAST(CAST(TIMESTAMP_NTZ'...' AS TIMESTAMP) AS BIGINT)`.
+    #[test]
+    fn local_times_in_a_gap_use_the_offset_before_it() {
+        let cases = [
+            // An hour skipped for daylight saving time.
+            ("America/New_York", "2024-03-10T02:30:00", 1710055800),
+            // Whole days skipped when the zone crossed the date line.
+            ("Pacific/Apia", "2011-12-30T12:00:00", 1325282400),
+            ("Pacific/Kwajalein", "1993-08-21T12:00:00", 745977600),
+        ];
+        for (timezone, local, expected) in cases {
+            let local: NaiveDateTime = local.parse().unwrap();
+            let micros = local.and_utc().timestamp() * 1_000_000;
+            let utc = TimeZoneRules::parse(timezone)
+                .unwrap()
+                .local_to_utc::<TimestampMicrosecondType>(micros)
+                .unwrap();
+            assert_eq!(utc, expected * 1_000_000, "{timezone} {local}");
+        }
     }
 
     #[test]
