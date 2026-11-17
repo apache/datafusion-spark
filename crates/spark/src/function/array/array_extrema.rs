@@ -4,8 +4,8 @@
 
 //! Spark-compatible `array_max` and `array_min`.
 
-use super::array_position::contains_map;
-use super::float_normalize::normalize_array;
+use crate::function::float_normalize::normalize_array;
+use crate::function::type_coercion::is_orderable;
 use arrow::array::{
     Array, ArrayRef, ArrowPrimitiveType, AsArray, GenericListArray, OffsetSizeTrait,
     PrimitiveArray, UInt64Array, make_comparator, new_null_array,
@@ -186,7 +186,7 @@ fn coerce_array(name: &str, arg_types: &[DataType]) -> Result<Vec<DataType>> {
         other => return unexpected_input_type(name, other),
     };
     let element = element_type(name, std::slice::from_ref(&coerced))?;
-    if contains_map(&element) {
+    if !is_orderable(&element) {
         return plan_err!(
             "[DATATYPE_MISMATCH.INVALID_ORDERING_TYPE] The `{name}` does not support \
              ordering on type {element}"
