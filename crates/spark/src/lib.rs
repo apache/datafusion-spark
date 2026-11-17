@@ -167,6 +167,11 @@ pub mod function;
 pub mod planner;
 
 pub use config::{MapKeyDedupPolicy, SparkOptions};
+mod eval_mode;
+pub mod function;
+pub mod planner;
+
+pub use eval_mode::EvalMode;
 
 #[cfg(feature = "core")]
 mod session_state;
