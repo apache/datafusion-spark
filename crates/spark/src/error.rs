@@ -23,13 +23,19 @@ use datafusion_common::DataFusionError;
 /// bypass this error.` to the `CAST_INVALID_INPUT` and `CAST_OVERFLOW`
 /// messages, and 4.0 dropped it.
 /// Spark quotes values and types in the forms its `toSQLValue` and `toSQLType`
-/// produce. The caller passes them already formatted, such as `2147483648L` and
-/// `"BIGINT"` without the quotes, since only the caller knows the Spark type.
+/// produce. The caller passes them already formatted, such as `2147483648L`,
+/// `NaN`, or `'abc'` from [`SparkError::sql_string`], and `"BIGINT"` without the
+/// quotes, since only the caller knows the Spark type. Every message ends with
+/// the error's SQLSTATE, as Spark's do.
+///
+/// The variants are `#[non_exhaustive]` so that fields can be added later.
+/// Code outside this crate matches them with `..`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SparkError {
     /// `CAST_INVALID_INPUT`: a value that cannot be parsed as the target type,
     /// in ANSI mode. Spark raises it as a `SparkNumberFormatException`.
+    #[non_exhaustive]
     CastInvalidValue {
         value: String,
         from_type: String,
@@ -38,6 +44,7 @@ pub enum SparkError {
     /// The same error class and message as [`SparkError::CastInvalidValue`],
     /// for a cast to a date or timestamp. Spark raises it as a
     /// `SparkDateTimeException` rather than a `SparkNumberFormatException`.
+    #[non_exhaustive]
     InvalidInputInCastToDatetime {
         value: String,
         from_type: String,
@@ -45,6 +52,7 @@ pub enum SparkError {
     },
     /// `CAST_OVERFLOW`: a value outside the range of the target type, in ANSI
     /// mode.
+    #[non_exhaustive]
     CastOverflow {
         value: String,
         from_type: String,
@@ -52,6 +60,7 @@ pub enum SparkError {
     },
     /// `NUMERIC_VALUE_OUT_OF_RANGE.WITH_SUGGESTION`: a value that does not fit
     /// the target decimal precision and scale, in ANSI mode.
+    #[non_exhaustive]
     NumericValueOutOfRange {
         value: String,
         precision: u8,
@@ -59,6 +68,7 @@ pub enum SparkError {
     },
     /// `NUMERIC_OUT_OF_SUPPORTED_RANGE`: a string with more than 38 digits cast
     /// to a decimal.
+    #[non_exhaustive]
     NumericOutOfSupportedRange { value: String },
 }
 
@@ -75,6 +85,24 @@ impl SparkError {
             }
             Self::NumericOutOfSupportedRange { .. } => "NUMERIC_OUT_OF_SUPPORTED_RANGE",
         }
+    }
+
+    /// The SQLSTATE that Spark reports with the error class.
+    pub fn sql_state(&self) -> &'static str {
+        match self {
+            Self::CastInvalidValue { .. } | Self::InvalidInputInCastToDatetime { .. } => {
+                "22018"
+            }
+            Self::CastOverflow { .. }
+            | Self::NumericValueOutOfRange { .. }
+            | Self::NumericOutOfSupportedRange { .. } => "22003",
+        }
+    }
+
+    /// A string value as Spark's `toSQLValue` renders it in a message: quoted,
+    /// with backslashes and quotes escaped, so `a'b` becomes `'a\'b'`.
+    pub fn sql_string(value: &str) -> String {
+        format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
     }
 
     /// Finds a `SparkError` in `error`, looking through the
@@ -98,6 +126,7 @@ impl SparkError {
 impl Display for SparkError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let class = self.error_class();
+        let sql_state = self.sql_state();
         match self {
             Self::CastInvalidValue {
                 value,
@@ -110,10 +139,10 @@ impl Display for SparkError {
                 to_type,
             } => write!(
                 f,
-                "[{class}] The value '{value}' of the type \"{from_type}\" cannot be cast to \
+                "[{class}] The value {value} of the type \"{from_type}\" cannot be cast to \
                  \"{to_type}\" because it is malformed. Correct the value as per the syntax, or \
                  change its target type. Use `try_cast` to tolerate malformed input and return \
-                 NULL instead."
+                 NULL instead. SQLSTATE: {sql_state}"
             ),
             Self::CastOverflow {
                 value,
@@ -123,7 +152,7 @@ impl Display for SparkError {
                 f,
                 "[{class}] The value {value} of the type \"{from_type}\" cannot be cast to \
                  \"{to_type}\" due to an overflow. Use `try_cast` to tolerate overflow and return \
-                 NULL instead."
+                 NULL instead. SQLSTATE: {sql_state}"
             ),
             Self::NumericValueOutOfRange {
                 value,
@@ -131,14 +160,16 @@ impl Display for SparkError {
                 scale,
             } => write!(
                 f,
-                "[{class}] {value} cannot be represented as Decimal({precision}, {scale}). If \
+                // Spark renders the empty parent template, a space, then the
+                // subclass template, so there are two spaces after the class.
+                "[{class}]  {value} cannot be represented as Decimal({precision}, {scale}). If \
                  necessary set \"spark.sql.ansi.enabled\" to \"false\" to bypass this error, and \
-                 return NULL instead."
+                 return NULL instead. SQLSTATE: {sql_state}"
             ),
             Self::NumericOutOfSupportedRange { value } => write!(
                 f,
                 "[{class}] The value {value} cannot be interpreted as a numeric since it has \
-                 more than 38 digits."
+                 more than 38 digits. SQLSTATE: {sql_state}"
             ),
         }
     }
@@ -173,10 +204,10 @@ mod tests {
             overflow().to_string(),
             "[CAST_OVERFLOW] The value 2147483648L of the type \"BIGINT\" cannot be cast to \
              \"INT\" due to an overflow. Use `try_cast` to tolerate overflow and return NULL \
-             instead."
+             instead. SQLSTATE: 22003"
         );
         let invalid = SparkError::CastInvalidValue {
-            value: "abc".to_string(),
+            value: SparkError::sql_string("abc"),
             from_type: "STRING".to_string(),
             to_type: "INT".to_string(),
         };
@@ -184,10 +215,11 @@ mod tests {
             invalid.to_string(),
             "[CAST_INVALID_INPUT] The value 'abc' of the type \"STRING\" cannot be cast to \
              \"INT\" because it is malformed. Correct the value as per the syntax, or change its \
-             target type. Use `try_cast` to tolerate malformed input and return NULL instead."
+             target type. Use `try_cast` to tolerate malformed input and return NULL instead. \
+             SQLSTATE: 22018"
         );
         let datetime = SparkError::InvalidInputInCastToDatetime {
-            value: "abc".to_string(),
+            value: SparkError::sql_string("abc"),
             from_type: "STRING".to_string(),
             to_type: "DATE".to_string(),
         };
@@ -201,9 +233,9 @@ mod tests {
         };
         assert_eq!(
             out_of_range.to_string(),
-            "[NUMERIC_VALUE_OUT_OF_RANGE.WITH_SUGGESTION] 123.45 cannot be represented as \
+            "[NUMERIC_VALUE_OUT_OF_RANGE.WITH_SUGGESTION]  123.45 cannot be represented as \
              Decimal(4, 2). If necessary set \"spark.sql.ansi.enabled\" to \"false\" to bypass \
-             this error, and return NULL instead."
+             this error, and return NULL instead. SQLSTATE: 22003"
         );
         let too_many_digits = SparkError::NumericOutOfSupportedRange {
             value: "1".repeat(39),
@@ -212,9 +244,27 @@ mod tests {
             too_many_digits.to_string(),
             format!(
                 "[NUMERIC_OUT_OF_SUPPORTED_RANGE] The value {} cannot be interpreted as a \
-                 numeric since it has more than 38 digits.",
+                 numeric since it has more than 38 digits. SQLSTATE: 22003",
                 "1".repeat(39)
             )
+        );
+    }
+
+    /// Spark's `toSQLValue` for strings, and a double, which it leaves unquoted.
+    #[test]
+    fn test_values_are_formatted_by_the_caller() {
+        assert_eq!(SparkError::sql_string("abc"), "'abc'");
+        assert_eq!(SparkError::sql_string("a'b"), r"'a\'b'");
+        assert_eq!(SparkError::sql_string(r"a\b"), r"'a\\b'");
+        let nan = SparkError::InvalidInputInCastToDatetime {
+            value: "NaN".to_string(),
+            from_type: "DOUBLE".to_string(),
+            to_type: "TIMESTAMP".to_string(),
+        };
+        assert!(
+            nan.to_string()
+                .starts_with("[CAST_INVALID_INPUT] The value NaN of the type \"DOUBLE\""),
+            "{nan}"
         );
     }
 
