@@ -40,6 +40,17 @@ ORDER BY g;
 1 [10]
 2 [20]
 
+# collect_list with GROUP BY: all-NULL group returns empty list, duplicates retained
+query I?
+SELECT g, array_sort(collect_list(a))
+FROM (VALUES (1::INT, 5::INT), (1::INT, 5::INT), (1::INT, NULL::INT), (2::INT, 10::INT), (2::INT, 20::INT), (3::INT, NULL::INT), (3::INT, NULL::INT)) AS t(g, a)
+GROUP BY g
+ORDER BY g;
+----
+1 [5, 5]
+2 [10, 20]
+3 []
+
 # we need to wrap collect_set with array_sort to have consistent outputs
 query ?
 SELECT array_sort(collect_set(a)) FROM (VALUES (1), (2), (3)) AS t(a);
@@ -109,6 +120,16 @@ ORDER BY g;
 1 [5]
 2 [10, 20]
 3 []
+
+# FILTER clause with GROUP BY: a group whose rows are all filtered out returns empty list
+query I??
+SELECT g, array_sort(collect_list(a) FILTER (WHERE a > 10)), array_sort(collect_set(a) FILTER (WHERE a > 10))
+FROM (VALUES (1::INT, 5::INT), (1::INT, 20::INT), (1::INT, 20::INT), (2::INT, 5::INT), (2::INT, NULL::INT)) AS t(g, a)
+GROUP BY g
+ORDER BY g;
+----
+1 [20, 20] [20]
+2 [] []
 
 # ORDER BY inside the call is not supported (https://github.com/apache/datafusion-spark/issues/112)
 query error expects single batch
