@@ -135,7 +135,19 @@ SELECT array_repeat(1, c) FROM (VALUES (2), (NULL), (0)) AS t(c);
 NULL
 []
 
-# A BIGINT count outside the INT range fails the cast to INT.
+# A dictionary-encoded integer count has the type of its values.
+query ?
+SELECT array_repeat('a', arrow_cast(2, 'Dictionary(Int32, Int64)'));
+----
+[a, a]
+
+query error \[DATATYPE_MISMATCH\.UNEXPECTED_INPUT_TYPE\] The second parameter of `array_repeat` requires the "INT" type, however it has the type "STRING"\. SQLSTATE: 42K09
+SELECT array_repeat('a', arrow_cast('2', 'Dictionary(Int32, Utf8)'));
+
+# A BIGINT count outside the INT range fails the cast to INT. Spark rejects
+# this at analysis with UNEXPECTED_INPUT_TYPE, because it types the literal as
+# BIGINT. `coerce_types` only sees types, so it accepts every integer type and
+# the out-of-range value fails the cast instead.
 query error Cast error
 SELECT array_repeat('a', 3000000000);
 

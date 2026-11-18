@@ -93,8 +93,13 @@ impl ScalarUDFImpl for SparkArrayRepeat {
         // Spark's `ArrayRepeat` takes an INT count. DataFusion types bare integer
         // literals as BIGINT, so accept every integer type and cast to INT. A
         // value outside the INT range then fails the cast instead of being
-        // silently truncated.
-        if !(second_type.is_integer() || second_type.is_null()) {
+        // silently truncated. Spark has no dictionary types, so a dictionary-encoded
+        // count has the type of its values.
+        let count_type = match second_type {
+            DataType::Dictionary(_, value) => value.as_ref(),
+            other => other,
+        };
+        if !(count_type.is_integer() || count_type.is_null()) {
             return plan_err!(
                 "[DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE] The second parameter of \
                  `array_repeat` requires the \"INT\" type, however it has the type \
