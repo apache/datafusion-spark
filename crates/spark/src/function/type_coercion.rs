@@ -31,7 +31,8 @@ pub(crate) fn tightest_common_type(
     if let Dictionary(_, value) = right {
         return tightest_common_type(left, value, ansi_mode);
     }
-    if left == right {
+    // Nested types are widened field by field below, which also unwraps nested dictionaries.
+    if left == right && !left.is_nested() {
         return Some(left.clone());
     }
     if let (Some(l), Some(r)) = (numeric_precedence(left), numeric_precedence(right)) {
@@ -146,7 +147,10 @@ fn complex_type(
 /// Spark's `Cast.forceNullable`, for the casts that these rules produce. Of those, Spark
 /// marks only DATE to TIMESTAMP_NTZ as one that can return NULL.
 fn force_nullable(from: &DataType, to: &DataType) -> bool {
-    matches!((from, to), (DataType::Date32, DataType::Timestamp(_, None)))
+    match from {
+        DataType::Dictionary(_, value) => force_nullable(value, to),
+        _ => matches!((from, to), (DataType::Date32, DataType::Timestamp(_, None))),
+    }
 }
 
 /// Spark's `OrderUtils.isOrderable`. Spark cannot order maps or `CalendarIntervalType`, which
@@ -418,6 +422,15 @@ mod tests {
             tightest_common_type(&map(Int32, Date32), &map(Int32, ntz.clone()), false),
             Some(map(Int32, ntz.clone()))
         );
+        let date_dictionary = Dictionary(Box::new(Int32), Box::new(Date32));
+        assert_eq!(
+            tightest_common_type(
+                &map(date_dictionary, Int32),
+                &map(ntz.clone(), Int32),
+                false
+            ),
+            None
+        );
         let tz = Timestamp(arrow::datatypes::TimeUnit::Microsecond, Some("UTC".into()));
         assert_eq!(
             tightest_common_type(&map(Date32, Int32), &map(tz.clone(), Int32), false),
@@ -467,6 +480,23 @@ mod tests {
         assert_eq!(
             tightest_common_type(&dictionary(Float64), &dictionary(Float64), false),
             Some(Float64)
+        );
+        // So are dictionaries inside two equal nested types.
+        assert_eq!(
+            tightest_common_type(
+                &list(dictionary(Float64)),
+                &list(dictionary(Float64)),
+                false
+            ),
+            Some(list(Float64))
+        );
+        assert_eq!(
+            tightest_common_type(
+                &field(dictionary(Float64)),
+                &field(dictionary(Float64)),
+                false
+            ),
+            Some(field(Float64))
         );
     }
 
