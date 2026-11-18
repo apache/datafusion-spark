@@ -372,9 +372,12 @@ fn spark_timestamp_text<T: ArrowTimestampType>(
         Some(tz) => {
             let dt =
                 as_datetime_with_timezone::<T>(value, tz).ok_or_else(out_of_range)?;
-            let offset = dt.format("%:z").to_string();
+            // `%::z` keeps the seconds of the offset (`%:z` rounds them away);
+            // they are written only when not zero
+            let offset = dt.format("%::z").to_string();
+            let offset = offset.strip_suffix(":00").unwrap_or(&offset);
             // Java's `XXX` pattern writes a zero offset as `Z`
-            let offset = if offset == "+00:00" { "Z" } else { &offset };
+            let offset = if offset == "+00:00" { "Z" } else { offset };
             Ok(format!("{}{offset}", dt.format(SPARK_TIMESTAMP_FORMAT)))
         }
         None => Ok(as_datetime::<T>(value)
