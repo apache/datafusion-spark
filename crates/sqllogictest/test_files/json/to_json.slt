@@ -300,13 +300,13 @@ statement ok
 SET datafusion.execution.time_zone = 'America/Los_Angeles';
 
 query T
-SELECT to_json(named_struct('t', arrow_cast('1800-01-01T07:52:58Z', 'Timestamp(Microsecond, Some("UTC"))')));
+SELECT to_json(named_struct('t', arrow_cast('1800-01-01T07:52:58Z', 'Timestamp(Microsecond, Some("America/Los_Angeles"))')));
 ----
 {"t":"1800-01-01T00:00:00.000-07:52:58"}
 
 # an offset of whole minutes keeps its short form
 query T
-SELECT to_json(named_struct('t', arrow_cast('2024-01-01T01:02:03.123456Z', 'Timestamp(Microsecond, Some("UTC"))')));
+SELECT to_json(named_struct('t', arrow_cast('2024-01-01T01:02:03.123456Z', 'Timestamp(Microsecond, Some("America/Los_Angeles"))')));
 ----
 {"t":"2023-12-31T17:02:03.123-08:00"}
 
