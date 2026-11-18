@@ -249,14 +249,10 @@ Note that `Signature::exact` is narrow. A Spark function accepting any string
 type needs all of `Utf8`, `LargeUtf8`, and `Utf8View` handled, and a function
 accepting any integral type needs the full width range.
 
-If Spark's expression is `ImplicitCastInputTypes`, the fix is usually to declare
-its `inputTypes` with `SparkInputTypes` (`function/implicit_cast.rs`, with
-`sha2` as the example) rather than to widen a hand-written `Signature`. For a
-function that needs one type for several arguments, check whether it uses the
-rules in `function/type_coercion.rs`. See "Input types, casts and ANSI mode" in
-`CONTRIBUTING.md`. Report a function that still hand-rolls either as a finding,
-and note that `SparkInputTypes` only chooses the target types. The cast that
-then runs is not yet Spark's for every type (issue #88).
+If Spark's expression is `ImplicitCastInputTypes`, or needs one type for several
+arguments, suggest the shared helpers in "Input types, casts and ANSI mode" in
+`CONTRIBUTING.md`. Few functions use them yet, so report a hand-written
+signature as a defect only when it accepts or rejects the wrong types.
 
 **Return nullability.** Compare `return_field_from_args` (or `return_type`)
 against Spark's `nullable`. A function that reports non-nullable while Spark
@@ -367,17 +363,13 @@ grep -rn "TODO" crates/spark/src/function/<category>/$ARGUMENTS.rs \
 ```
 
 Wiring ANSI up is usually mechanical rather than a semantics decision. The flag
-is already threaded through `ScalarFunctionArgs`. Prefer an `EvalMode`
-(`Legacy`, `Ansi`, `Try`) over a `bool`, so that the `try_*` function can share
-the implementation. `parse_url` and `try_parse_url` are the example:
+is already threaded through `ScalarFunctionArgs`. Prefer an `EvalMode` over a
+`bool` (see `CONTRIBUTING.md`), as `parse_url` and `try_parse_url` do:
 
 ```rust
 let ScalarFunctionArgs { args, config_options, .. } = args;
 let eval_mode = EvalMode::from_config(&config_options);
 ```
-
-A function that only needs the flag can still read
-`config_options.execution.enable_ansi_mode`, as `abs` and `modulus` do.
 
 `crates/spark/src/function/math/abs.rs` and
 `crates/spark/src/function/math/modulus.rs` are the in-repo precedents for
