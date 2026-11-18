@@ -471,15 +471,17 @@ fn spark_sql_type(data_type: &DataType) -> String {
         Int64 => "BIGINT".to_string(),
         Float32 => "FLOAT".to_string(),
         Float64 => "DOUBLE".to_string(),
-        Decimal32(p, s) | Decimal64(p, s) | Decimal128(p, s) | Decimal256(p, s) => {
-            format!("DECIMAL({p},{s})")
-        }
+        Decimal128(p, s) => format!("DECIMAL({p},{s})"),
         Utf8 | LargeUtf8 | Utf8View => "STRING".to_string(),
-        Binary | LargeBinary | BinaryView | FixedSizeBinary(_) => "BINARY".to_string(),
-        Date32 | Date64 => "DATE".to_string(),
+        Binary | LargeBinary | BinaryView => "BINARY".to_string(),
+        Date32 => "DATE".to_string(),
         Timestamp(_, Some(_)) => "TIMESTAMP".to_string(),
         Timestamp(_, None) => "TIMESTAMP_NTZ".to_string(),
         Interval(IntervalUnit::MonthDayNano) => "INTERVAL".to_string(),
+        Interval(IntervalUnit::YearMonth) => "INTERVAL YEAR TO MONTH".to_string(),
+        Duration(_) => "INTERVAL DAY TO SECOND".to_string(),
+        // Arrow has no TIME precision. Spark's `make_time` returns TIME(6).
+        Time64(_) => "TIME(6)".to_string(),
         List(field) | LargeList(field) | FixedSizeList(field, _) => {
             format!("ARRAY<{}>", spark_sql_type(field.data_type()))
         }
@@ -489,7 +491,7 @@ fn spark_sql_type(data_type: &DataType) -> String {
                 .iter()
                 .map(|f| format!(
                     "{}: {}{}",
-                    f.name(),
+                    quote_if_needed(f.name()),
                     spark_sql_type(f.data_type()),
                     if f.is_nullable() { "" } else { " NOT NULL" }
                 ))
@@ -497,15 +499,29 @@ fn spark_sql_type(data_type: &DataType) -> String {
                 .join(", ")
         ),
         Map(entries, _) => match entries.data_type() {
-            Struct(kv) if kv.len() == 2 => format!(
+            Struct(kv) if let [k, v] = &kv[..] => format!(
                 "MAP<{}, {}>",
-                spark_sql_type(kv[0].data_type()),
-                spark_sql_type(kv[1].data_type())
+                spark_sql_type(k.data_type()),
+                spark_sql_type(v.data_type())
             ),
             other => format!("MAP<{other}>"),
         },
         Dictionary(_, value) => spark_sql_type(value),
         other => other.to_string(),
+    }
+}
+
+/// Spark's `QuotingUtils.quoteIfNeeded`, which `StructField.sql` uses for field names.
+fn quote_if_needed(name: &str) -> String {
+    let mut chars = name.chars();
+    let plain = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if plain {
+        name.to_string()
+    } else {
+        format!("`{}`", name.replace('`', "``"))
     }
 }
 
@@ -770,5 +786,33 @@ mod tests {
             "\"ARRAY<(STRING OR BINARY)>\""
         );
         assert_eq!(T::Array(Box::new(T::Long)).sql(), "\"ARRAY<BIGINT>\"");
+    }
+
+    #[test]
+    fn arrow_type_names_match_to_sql_type() {
+        use arrow::datatypes::{Field, TimeUnit};
+        let name = spark_sql_type;
+        assert_eq!(
+            name(&DataType::Interval(IntervalUnit::YearMonth)),
+            "INTERVAL YEAR TO MONTH"
+        );
+        assert_eq!(
+            name(&DataType::Interval(IntervalUnit::MonthDayNano)),
+            "INTERVAL"
+        );
+        assert_eq!(
+            name(&DataType::Duration(TimeUnit::Microsecond)),
+            "INTERVAL DAY TO SECOND"
+        );
+        assert_eq!(name(&DataType::Time64(TimeUnit::Nanosecond)), "TIME(6)");
+        let fields = vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("a b", DataType::Int32, false),
+            Field::new("c`d", DataType::Utf8, true),
+        ];
+        assert_eq!(
+            name(&DataType::Struct(fields.into())),
+            "STRUCT<a: INT, `a b`: INT NOT NULL, `c``d`: STRING>"
+        );
     }
 }

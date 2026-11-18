@@ -199,6 +199,15 @@ SELECT sha2('Spark', true);
 query error \[DATATYPE_MISMATCH\.UNEXPECTED_INPUT_TYPE\] The second parameter of `sha2` requires the "INT" type, however it has the type "DATE"\. SQLSTATE: 42K09
 SELECT sha2('Spark', DATE '2024-01-01');
 
+query error \[DATATYPE_MISMATCH\.UNEXPECTED_INPUT_TYPE\] The first parameter of `sha2` requires the "BINARY" type, however it has the type "INTERVAL DAY TO SECOND"\. SQLSTATE: 42K09
+SELECT sha2(make_dt_interval(1), 256);
+
+query error \[DATATYPE_MISMATCH\.UNEXPECTED_INPUT_TYPE\] The first parameter of `sha2` requires the "BINARY" type, however it has the type "INTERVAL YEAR TO MONTH"\. SQLSTATE: 42K09
+SELECT sha2(arrow_cast(1, 'Interval(YearMonth)'), 256);
+
+query error \[DATATYPE_MISMATCH\.UNEXPECTED_INPUT_TYPE\] The first parameter of `sha2` requires the "BINARY" type, however it has the type "STRUCT<`a b`: INT>"\. SQLSTATE: 42K09
+SELECT sha2(named_struct('a b', CAST(NULL AS INT)), 256);
+
 query error \[WRONG_NUM_ARGS\.WITHOUT_SUGGESTION\] The `sha2` requires 2 parameters but the actual number is 1\.
 SELECT sha2('Spark');
 
