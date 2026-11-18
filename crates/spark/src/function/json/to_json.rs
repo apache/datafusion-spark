@@ -1757,6 +1757,37 @@ mod tests {
         );
     }
 
+    /// 1800-01-01 07:52:58 UTC, in microseconds since the epoch: midnight in
+    /// `America/Los_Angeles`, whose offset was then its local mean time
+    /// (UTC-07:52:58)
+    const LMT_MICROS: i64 = -5_364_634_022_000_000;
+
+    #[test]
+    fn test_timestamp_offset_keeps_its_seconds() {
+        // with the session time zone America/Los_Angeles, Spark writes
+        // TIMESTAMP '1800-01-01 00:00:00' as 1800-01-01T00:00:00.000-07:52:58:
+        // an offset with a seconds part is not rounded to the minute
+        let t = Arc::new(
+            TimestampMicrosecondArray::from(vec![TS_MICROS, LMT_MICROS])
+                .with_timezone("UTC"),
+        ) as ArrayRef;
+        let fields = Fields::from(vec![Field::new("t", t.data_type().clone(), true)]);
+        let input = StructArray::new(fields, vec![t], None);
+        let field = field_of(&input);
+
+        let mut config = ConfigOptions::default();
+        config
+            .set("datafusion.execution.time_zone", "America/Los_Angeles")
+            .unwrap();
+        let input = ColumnarValue::Array(Arc::new(input));
+        let out = run_with_config(input, field, config).unwrap();
+        let out = as_string_array(&out).unwrap();
+        // an offset of whole minutes keeps its short form
+        assert_eq!(out.value(0), r#"{"t":"2023-12-31T17:02:03.123-08:00"}"#);
+        // the local mean time offset keeps its seconds
+        assert_eq!(out.value(1), r#"{"t":"1800-01-01T00:00:00.000-07:52:58"}"#);
+    }
+
     #[test]
     fn test_java_float_text() {
         // Java Double.toString: plain decimal for 1e-3 <= |x| < 1e7, else scientific
