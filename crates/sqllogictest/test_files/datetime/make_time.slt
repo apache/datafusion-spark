@@ -279,13 +279,13 @@ CREATE TABLE make_time_null_t AS VALUES
   (24, 60, NULL::DECIMAL(16, 6)),
   (1, 2, 3::DECIMAL(16, 6));
 
-query D
+query D rowsort
 SELECT make_time(column1, column2, column3) FROM make_time_null_t;
 ----
-NULL
-NULL
-NULL
 01:02:03
+NULL
+NULL
+NULL
 
 statement ok
 DROP TABLE make_time_null_t;

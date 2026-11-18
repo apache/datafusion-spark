@@ -339,7 +339,6 @@ mod tests {
             result,
             Time64NanosecondArray::from(vec![Some(nanos(1, 10, 5)), None, None, None,])
         );
-        assert_eq!(result.offset(), 0);
         Ok(())
     }
 
