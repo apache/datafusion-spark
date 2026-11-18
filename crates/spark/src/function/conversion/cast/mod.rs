@@ -33,6 +33,7 @@ use datafusion_common::{
 use datafusion_expr::ColumnarValue;
 
 use crate::function::timezone_utils::{local_to_timestamp, timestamp_to_local};
+use crate::function::type_coercion::spark_sql_type;
 use crate::{EvalMode, SparkTimeZone};
 use numeric::{cast_float_to_timestamp, cast_int_to_timestamp};
 use utils::remove_trailing_zeroes;
@@ -289,7 +290,11 @@ pub(crate) fn cast_array(
 }
 
 fn not_supported(from_type: &DataType, to_type: &DataType) -> Result<ArrayRef> {
-    not_impl_err!("Spark-compatible cast from {from_type} to {to_type} is not supported")
+    not_impl_err!(
+        "Spark-compatible cast from {} to {} is not supported",
+        spark_sql_type(from_type),
+        spark_sql_type(to_type)
+    )
 }
 
 fn not_yet_ported(
@@ -298,8 +303,9 @@ fn not_yet_ported(
     eval_mode: EvalMode,
 ) -> Result<ArrayRef> {
     not_impl_err!(
-        "Spark-compatible cast from {from_type} to {to_type} in {eval_mode:?} mode is \
-         not implemented yet"
+        "Spark-compatible cast from {} to {} in {eval_mode:?} mode is not implemented yet",
+        spark_sql_type(from_type),
+        spark_sql_type(to_type)
     )
 }
 
@@ -401,7 +407,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("cast from Date32 to Binary is not supported"),
+                .contains("cast from DATE to BINARY is not supported"),
             "{error}"
         );
 

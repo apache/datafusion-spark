@@ -475,6 +475,35 @@ mod tests {
         assert_eq!(parse("struct<>"), DataType::Struct(Fields::empty()));
     }
 
+    /// The canonical Spark name of each type parses to a type that
+    /// [`spark_sql_type`] names the same way.
+    #[test]
+    fn test_round_trips_with_spark_sql_type() {
+        use crate::function::type_coercion::spark_sql_type;
+        for type_name in [
+            "BOOLEAN",
+            "TINYINT",
+            "SMALLINT",
+            "INT",
+            "BIGINT",
+            "FLOAT",
+            "DOUBLE",
+            "DECIMAL(10,0)",
+            "DECIMAL(38,18)",
+            "STRING",
+            "BINARY",
+            "DATE",
+            "TIMESTAMP",
+            "TIMESTAMP_NTZ",
+            "ARRAY<ARRAY<INT>>",
+            "MAP<STRING, ARRAY<TIMESTAMP>>",
+            "STRUCT<a: INT, `c d`: STRING NOT NULL, s: STRUCT<x: DATE>>",
+            "STRUCT<>",
+        ] {
+            assert_eq!(spark_sql_type(&parse(type_name)), type_name);
+        }
+    }
+
     /// Spark requires a length for CHAR and VARCHAR.
     #[test]
     fn test_char_and_varchar_require_a_length() {

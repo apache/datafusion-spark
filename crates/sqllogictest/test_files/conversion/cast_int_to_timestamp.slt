@@ -117,7 +117,7 @@ statement error Unsupported spark_cast target type 'interval': INTERVAL is not s
 SELECT spark_cast(100, 'interval');
 
 # Spark has no cast from a number to TIMESTAMP_NTZ
-statement error Spark-compatible cast from Int64 to Timestamp\(µs\) is not supported
+statement error Spark-compatible cast from BIGINT to TIMESTAMP_NTZ is not supported
 SELECT spark_cast(100::bigint, 'timestamp_ntz');
 
 # Test with different session timezones to verify simplify() picks up config

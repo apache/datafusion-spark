@@ -78,12 +78,12 @@ SELECT spark_cast(1, column1) FROM (VALUES ('int'));
 
 # Casts that are not implemented yet return an error instead of a result that
 # differs from Spark's
-statement error Spark-compatible cast from Utf8 to Int32 in Legacy mode is not implemented yet
+statement error Spark-compatible cast from STRING to INT in Legacy mode is not implemented yet
 SELECT spark_cast('1', 'int');
 
 # Spark has no cast from DATE to BINARY
-statement error Spark-compatible cast from Date32 to Binary is not supported
+statement error Spark-compatible cast from DATE to BINARY is not supported
 SELECT spark_cast(arrow_cast(1, 'Date32'), 'binary');
 
-statement error Spark-compatible cast from Int64 to Int32 in Legacy mode is not implemented yet
+statement error Spark-compatible cast from BIGINT to INT in Legacy mode is not implemented yet
 SELECT spark_cast(2147483648, 'int');
