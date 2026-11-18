@@ -33,6 +33,40 @@ have a physical implementation (`invoke_with_args()`) it is not usable by Comet.
 The functions in this crate need only support input types available to Spark; that
 is, they do not need to handle unsigned types or types such as `Float16` or `Decimal64`.
 
+### Input types, casts and ANSI mode
+
+Spark casts a function's arguments before it runs the function, and a failed cast or an invalid
+value behaves differently with ANSI mode on, off, and in the `try_*` functions. This crate has a
+shared piece for each of these. Use them rather than writing a `Signature`, a `coerce_types()`
+or an ANSI flag by hand, so that every function gets the same rules and the same errors.
+
+- **Declared input types.** When the Spark expression mixes in `ImplicitCastInputTypes`, declare
+  its `inputTypes` with `SparkInputType` and hold them in a `SparkInputTypes`
+  (`function/implicit_cast.rs`). The function then takes `signature()`, `coerce_types()` and
+  `with_updated_config()` from it, which gives Spark's casts, its `UNEXPECTED_INPUT_TYPE` and
+  `WRONG_NUM_ARGS` errors, and the ANSI or non-ANSI rules from the session config. `sha2` is a
+  complete example (`crates/spark/src/function/hash/sha2.rs`). This module only chooses the target
+  types. The cast that then runs is not yet Spark's, see the next point.
+- **Common type of several arguments.** When Spark finds one type for several arguments, as
+  `array_position` does for the array element and the searched value, use the rules in
+  `function/type_coercion.rs` such as `tightest_common_type()`. They also provide the type names
+  that Spark's errors use.
+- **Casting a value.** When a function needs to cast a value the way Spark's `CAST` does, call
+  `spark_cast()` (`function/conversion/cast/`) and not Arrow's `cast`. The casts are ported from
+  Comet one source type at a time ([#88]), and one that is not ported yet returns a "not
+  implemented" error. It does not fall back to Arrow's cast, because that would return a result
+  that differs from Spark's. If you need a cast that is missing, port it with its tests, or say in
+  the PR that the function depends on it.
+- **ANSI mode.** A function whose result depends on `spark.sql.ansi.enabled` takes an `EvalMode`
+  (`Legacy`, `Ansi` or `Try`), and not a `bool`. Read it in `invoke_with_args()` with
+  `EvalMode::from_config(&args.config_options)`. Spark's `try_*` function then calls the same
+  implementation with `EvalMode::Try`, as `parse_url` and `try_parse_url` do.
+
+Test these through SQLLogicTests with ANSI mode both on and off (`set
+datafusion.execution.enable_ansi_mode = true;`), because the coercion only happens when the
+function is planned from SQL.
+
+[#88]: https://github.com/apache/datafusion-spark/issues/88
 [sail]: https://github.com/lakehq/sail
 [comet]: https://github.com/apache/datafusion-comet
 
