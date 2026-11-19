@@ -15,7 +15,11 @@ Instead, edit the #[user_doc] attributes on the functions and run the script.
 Part of the [datafusion-spark function reference](../README.md).
 
 - [array](#array)
+- [array_insert](#array_insert)
+- [array_max](#array_max)
+- [array_min](#array_min)
 - [array_position](#array_position)
+- [array_remove](#array_remove)
 - [array_repeat](#array_repeat)
 - [shuffle](#shuffle)
 - [size](#size)
@@ -44,9 +48,76 @@ array(expr, ...)
 []
 ```
 
+## `array_insert`
+
+Returns `array` with `item` inserted at index `pos`. DataFusion has no built-in `array_insert`. Indexes are 1-based, and a negative index counts from the end, so -1 inserts after the last element. An index past the end pads with NULLs before the item. A negative index before the start places the item first, then NULL padding, then the original elements. Returns NULL if `array` or `pos` is NULL. An index of 0 is an error (`INVALID_INDEX_OF_ZERO`), as is a result longer than Spark's maximum array length (`COLLECTION_SIZE_LIMIT_EXCEEDED`). With Spark's `spark.sql.legacy.negativeIndexInArrayInsert`, -1 inserts before the last element instead, and a negative index before the start pads one more NULL, so -(n+1) on an array of n elements gives the item, one NULL, then the elements.
+
+```sql
+array_insert(array, pos, item)
+```
+
+### Arguments
+
+- **array**: Array expression to insert into. NULL returns NULL.
+- **pos**: Integer index, 1-based, of any integer type (cast to INT). A negative value counts from the end. 0 is an error. NULL returns NULL.
+- **item**: Value to insert. Must share a type family with the array's elements. A NULL item is inserted as a NULL element.
+
+### Example
+
+```sql
+> SELECT array_insert(make_array(1, 2, 3), 2, 10);
+[1, 10, 2, 3]
+> SELECT array_insert(make_array(5, 4, 3, 2), -1, 1);
+[5, 4, 3, 2, 1]
+> SELECT array_insert(make_array(1, 2, 3), 5, 100);
+[1, 2, 3, NULL, 100]
+> SELECT array_insert(make_array(1), -3, 100);
+[100, NULL, 1]
+> SELECT array_insert(make_array(1, 2), NULL::INT, 5);
+NULL
+```
+
+## `array_max`
+
+Returns the maximum element of the array, using Spark's ordering. NULL elements are skipped, and an empty array or an array of only NULL elements returns NULL. For floating point values, also inside nested arrays and structs, NaN is greater than every other value, including infinity, and -0.0 is equal to 0.0. On a tie the first of the tied elements is returned as it is, so the sign of a zero and the bits of a NaN are kept. Strings and binary values compare bytewise. Arrays compare element by element and then by length, and structs compare field by field; NULLs nested inside them sort before other values. Map and INTERVAL elements, at any depth, are an error, as in Spark. DataFusion's built-in of the same name differs: it orders -0.0 before 0.0 rather than returning the first of them, sorts NULLs nested inside arrays and structs after other values, rejects a NULL argument at planning instead of returning NULL, and fails at execution on map elements.
+
+```sql
+array_max(array)
+```
+
+### Arguments
+
+- **array**: Array expression. NULL returns NULL.
+
+### Example
+
+```sql
+> SELECT array_max(array(1, 20, NULL, 3));
+20
+```
+
+## `array_min`
+
+Returns the minimum element of the array, using Spark's ordering. NULL elements are skipped, and an empty array or an array of only NULL elements returns NULL. For floating point values, also inside nested arrays and structs, NaN is greater than every other value, including infinity, and -0.0 is equal to 0.0. On a tie the first of the tied elements is returned as it is, so the sign of a zero and the bits of a NaN are kept. Strings and binary values compare bytewise. Arrays compare element by element and then by length, and structs compare field by field; NULLs nested inside them sort before other values. Map and INTERVAL elements, at any depth, are an error, as in Spark. DataFusion's built-in of the same name differs: it orders -0.0 before 0.0 rather than returning the first of them, sorts NULLs nested inside arrays and structs after other values, rejects a NULL argument at planning instead of returning NULL, and fails at execution on map elements.
+
+```sql
+array_min(array)
+```
+
+### Arguments
+
+- **array**: Array expression. NULL returns NULL.
+
+### Example
+
+```sql
+> SELECT array_min(array(1, 20, NULL, 3));
+1
+```
+
 ## `array_position`
 
-Returns the 1-based position of the first occurrence of the element in the array, as a `BIGINT`. The DataFusion built-in returns a `UInt64`, and returns NULL when the element is not found, where this returns 0. The result is NULL only when the array or the element is NULL: a NULL element returns NULL even if the array contains NULL, while in the DataFusion built-in a NULL element matches the first NULL in the array. Top-level NULL elements in the array never match, while corresponding NULLs nested inside compared arrays or structs are equal. For floating point values, also inside nested arrays and structs, NaN is equal to NaN and -0.0 is equal to 0.0. As in Spark, the array element and the element are cast to their tightest common type: numbers widen, an integer widens to a decimal only if the decimal can hold all its values, and a date widens to a timestamp. Other combinations are an error, for example a string and a number, two different decimals, or structs whose field names or field types differ, as in Spark with ANSI mode off (with ANSI mode on, Spark widens struct field types). A NULL-typed array and map elements are also an error.
+Returns the 1-based position of the first occurrence of the element in the array, as a `BIGINT`. The DataFusion built-in returns a `UInt64`, and returns NULL when the element is not found, where this returns 0. The result is NULL only when the array or the element is NULL: a NULL element returns NULL even if the array contains NULL, while in the DataFusion built-in a NULL element matches the first NULL in the array. Top-level NULL elements in the array never match, while corresponding NULLs nested inside compared arrays or structs are equal. For floating point values, also inside nested arrays and structs, NaN is equal to NaN and -0.0 is equal to 0.0. As in Spark, the array element and the element are cast to their tightest common type: numbers widen, an integer widens to a decimal only if the decimal can hold all its values, and a date widens to a timestamp. Other combinations are an error, for example a string and a number, two different decimals, or structs whose field names or field types differ, as in Spark with ANSI mode off (with ANSI mode on, Spark widens struct field types). A NULL-typed array, and map or INTERVAL elements at any depth, are also an error.
 
 ```sql
 array_position(array, element)
@@ -64,6 +135,26 @@ array_position(array, element)
 3
 > SELECT array_position(array(3, 2, 1), 4);
 0
+```
+
+## `array_remove`
+
+Removes all elements that are equal to the element from the array, while the DataFusion built-in removes only the first one. The result is NULL when the array or the element is NULL. NULL elements in the array are always kept. Corresponding NULLs nested inside compared arrays or structs are equal. For floating point values, also inside nested arrays and structs, NaN is equal to NaN and -0.0 is equal to 0.0; the elements that are kept keep their original values. As in Spark, the array element and the element are cast to their tightest common type, and the result is an array of that type: numbers widen, an integer widens to a decimal only if the decimal can hold all its values, and a date widens to a timestamp. Other combinations are an error, for example a string and a number, two different decimals, or structs whose field names or field types differ, as in Spark with ANSI mode off (with ANSI mode on, Spark widens struct field types). Map and INTERVAL elements, at any depth, are also an error.
+
+```sql
+array_remove(array, element)
+```
+
+### Arguments
+
+- **array**: Array expression. NULL returns NULL.
+- **element**: Element to remove. NULL returns NULL.
+
+### Example
+
+```sql
+> SELECT array_remove(array(1, 2, 3, NULL, 3), 3);
+[1, 2, NULL]
 ```
 
 ## `array_repeat`

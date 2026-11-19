@@ -15,6 +15,7 @@ Instead, edit the #[user_doc] attributes on the functions and run the script.
 Part of the [datafusion-spark function reference](../README.md).
 
 - [crc32](#crc32)
+- [hash](#hash)
 - [sha](#sha)
 - [sha1](#sha1)
 - [sha2](#sha2)
@@ -40,6 +41,32 @@ crc32(expr)
 0
 > SELECT crc32(NULL);
 NULL
+```
+
+## `hash`
+
+Returns the 32-bit Murmur3 hash (seed 42) of the arguments as an INT, matching Spark's `hash`. DataFusion has no built-in equivalent. Arguments are hashed in order, and each argument's hash seeds the next, so `hash(a, b)` equals `hash(named_struct('a', a, 'b', b))` and argument order matters. NULL arguments, NULL list elements and NULL struct fields are skipped, so the result is never NULL: `hash(NULL)` returns 42. The result depends on the input type, as in Spark: INT hashes 4 bytes and BIGINT 8, and integer literals are BIGINT in DataFusion but INT in Spark, so cast them to INT to match Spark's results. `-0.0` hashes like `0.0`, and every NaN hashes like the canonical NaN. Dates hash as INT days and timestamps as BIGINT microseconds, whatever the Arrow unit (DataFusion's TIMESTAMP literals are nanoseconds, floored to microseconds). TIME hashes as BIGINT nanoseconds since midnight, a year-month interval (`Interval(YearMonth)`) as INT months and a day-time interval (`Duration(Microsecond)`) as BIGINT microseconds. A calendar interval (`Interval(MonthDayNano)`) hashes its microseconds and then its months, and leaves out its days, as Spark 4.2's generated code does (Spark 4.3 includes the days, see SPARK-58236). DataFusion types `INTERVAL '1' DAY` as a calendar interval, so it hashes like a zero interval, where Spark hashes it as a day-time interval. Use `arrow_cast(86400000000, 'Duration(Microsecond)')` to match Spark. Decimals with precision up to 18 hash as their unscaled long, and wider decimals hash the minimal big-endian two's complement bytes of the unscaled value. Lists hash each element in order (nested lists flatten into the same chain, and an empty list leaves the seed unchanged), structs hash each field, and maps hash each key then its value. This crate hashes maps as if Spark's `spark.sql.legacy.allowHashOnMapType` were set, where Spark 4 rejects them by default (see https://github.com/apache/datafusion-spark/issues/69). Dictionary-encoded values hash like their decoded values. At least one argument is required.
+
+```sql
+hash(expr1[, ..., exprN])
+```
+
+### Arguments
+
+- **expr1**: Expression of any type to hash. NULL is skipped.
+- **exprN**: Further expressions, hashed in order with the previous hash as the seed.
+
+### Example
+
+```sql
+> SELECT hash('Spark', [CAST(123 AS INT)], CAST(2 AS INT));
+-1321691492
+> SELECT hash(CAST(1 AS INT));
+-559580957
+> SELECT hash(1);
+-1712319331
+> SELECT hash(NULL);
+42
 ```
 
 ## `sha`
@@ -88,7 +115,7 @@ sha2(expr, bit_length)
 ### Arguments
 
 - **expr**: String or binary expression to hash. Strings are hashed as UTF-8 bytes. NULL returns NULL.
-- **bit_length**: Integer SHA-2 variant: 224, 256, 384 or 512. 0 is treated as 256. Any other value, or NULL, returns NULL.
+- **bit_length**: SHA-2 variant: 224, 256, 384 or 512, cast to INT as in Spark. 0 is treated as 256. Any other value, or NULL, returns NULL.
 
 ### Example
 

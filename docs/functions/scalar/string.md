@@ -20,6 +20,7 @@ Part of the [datafusion-spark function reference](../README.md).
 - [character_length](#character_length)
 - [concat](#concat)
 - [concat_ws](#concat_ws)
+- [contains](#contains)
 - [elt](#elt)
 - [format_string](#format_string)
 - [ilike](#ilike)
@@ -137,6 +138,30 @@ foo/bar
 x,a,b,y
 > SELECT concat_ws(NULL, 'a', 'b');
 NULL
+```
+
+## `contains`
+
+Returns true if `right` is found inside `left`. DataFusion's own `contains` takes only strings; this one also accepts binary. When both arguments are binary the match is on bytes. When one argument is a string and the other is binary, both are compared as bytes, which is the same as Spark casting the binary to a string. Integer, boolean and date arguments are cast to a string first. Other types are rejected at planning, including floating-point, decimal and timestamp arguments, which Spark casts to a string (see https://github.com/apache/datafusion-spark/issues/347). The match is case-sensitive, and an empty `right` is found in every value, including an empty `left`. Returns NULL if either input is NULL.
+
+```sql
+contains(left, right)
+```
+
+### Arguments
+
+- **left**: String or binary expression to search in. NULL returns NULL.
+- **right**: String or binary expression to search for. NULL returns NULL.
+
+### Example
+
+```sql
+> SELECT contains('Spark SQL', 'Spark');
+true
+> SELECT contains('Spark SQL', 'SPARK');
+false
+> SELECT contains(x'537061726b2053514c', x'537061726b');
+true
 ```
 
 ## `elt`

@@ -16,6 +16,7 @@ Part of the [datafusion-spark function reference](../README.md).
 
 - [json_array_length](#json_array_length)
 - [json_tuple](#json_tuple)
+- [to_json](#to_json)
 
 ## `json_array_length`
 
@@ -62,4 +63,27 @@ json_tuple(json_str, key1[, key2, ...])
 {c0: 1, c1: x, c2: NULL}
 > SELECT json_tuple('[1, 2]', 'a');
 NULL
+```
+
+## `to_json`
+
+Serializes a struct to a JSON string, one object per row, as Spark's `to_json` does with its default options. DataFusion has no built-in `to_json`. A NULL struct returns NULL. NULL struct fields are omitted (`ignoreNullFields`), while NULL map entries are kept as `"key":null`. Nested structs, lists and maps are serialized recursively. Floats are written like Java's `Double.toString` (`1.0`, `1.0E-5`; `NaN` and `Infinity` as strings), decimals like `BigDecimal.toString` (`1.50`, `0E-10`), binary as Base64, dates as `yyyy-MM-dd`, timestamps as `yyyy-MM-dd'T'HH:mm:ss.SSS` with the session time zone offset (`datafusion.execution.time_zone`, `Z` for UTC) and without offset for a timestamp without time zone. Map keys are written as strings holding Spark's internal value: dates as days since the epoch, timestamps as microseconds, numbers as above. Types with no Spark JSON representation (intervals, durations, times, unions, map keys other than strings, booleans, numbers, dates and timestamps) are rejected when the query is planned. The options argument and map or array input are not supported.
+
+```sql
+to_json(struct_expr)
+```
+
+### Arguments
+
+- **struct_expr**: Struct expression to serialize, e.g. a struct column or a `named_struct` call. The field names become the JSON keys. NULL returns NULL.
+
+### Example
+
+```sql
+> SELECT to_json(named_struct('a', 1, 'b', 'x', 'c', CAST(NULL AS INT)));
+{"a":1,"b":"x"}
+> SELECT to_json(named_struct('t', TIMESTAMP '2024-01-01 01:02:03.123456', 'd', 1e-5));
+{"t":"2024-01-01T01:02:03.123","d":1.0E-5}
+> SELECT to_json(named_struct('m', map([DATE '2024-01-01'], [1])));
+{"m":{"19723":1}}
 ```

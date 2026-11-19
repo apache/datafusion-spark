@@ -18,6 +18,7 @@ Part of the [datafusion-spark function reference](../README.md).
 - [bitmap_bucket_number](#bitmap_bucket_number)
 - [bitmap_count](#bitmap_count)
 - [equal_null](#equal_null)
+- [spark_cast](#spark_cast)
 - [stack](#stack)
 
 ## `bitmap_bit_position`
@@ -109,6 +110,28 @@ true
 false
 > SELECT equal_null(NULL, NULL);
 true
+```
+
+## `spark_cast`
+
+Casts `expr` to `type` as Spark's `CAST(expr AS type)` does. The target type is a string literal in Spark's SQL type syntax: BOOLEAN, TINYINT (BYTE), SMALLINT (SHORT), INT (INTEGER), BIGINT (LONG), FLOAT (REAL), DOUBLE, DECIMAL(p, s) (DEC, NUMERIC), STRING, CHAR(n), VARCHAR(n), BINARY, DATE, TIMESTAMP (TIMESTAMP_LTZ), TIMESTAMP_NTZ, and ARRAY<...>, MAP<..., ...> and STRUCT<name: type, ...> of these. Type names are case-insensitive. CHAR and VARCHAR require a length and cast to STRING. INTERVAL, TIME, VARIANT, VOID and the geospatial types are not supported. The cast follows `datafusion.execution.enable_ansi_mode`, as Spark's follows `spark.sql.ansi.enabled`, and uses `datafusion.execution.time_zone` as the session time zone. Casts are being ported from Comet (https://github.com/apache/datafusion-spark/issues/88): a cast that Spark supports but this function does not yet returns a "not implemented yet" error, and a cast that Spark does not support returns a "not supported" error. Returns NULL if `expr` is NULL.
+
+```sql
+spark_cast(expr, type)
+```
+
+### Arguments
+
+- **expr**: Expression to cast.
+- **type**: The target type, as a string literal in Spark's SQL type syntax, such as 'int', 'decimal(10, 2)' or 'array<timestamp>'.
+
+### Example
+
+```sql
+> SELECT spark_cast(true, 'int');
+1
+> SELECT spark_cast(0, 'timestamp');
+1970-01-01T00:00:00Z
 ```
 
 ## `stack`

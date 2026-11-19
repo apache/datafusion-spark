@@ -15,6 +15,7 @@ Instead, edit the #[user_doc] attributes on the functions and run the script.
 Part of the [datafusion-spark function reference](../README.md).
 
 - [if](#if)
+- [nanvl](#nanvl)
 
 ## `if`
 
@@ -39,4 +40,30 @@ a
 no
 > SELECT if(true, 1 / 1, 1 / 0);
 1
+```
+
+## `nanvl`
+
+Returns `expr1` if it is not NaN, or `expr2` if `expr1` is NaN. Unlike DataFusion's built-in `nanvl`, which evaluates both arguments eagerly, this function only evaluates `expr2` when `expr1` is NaN, matching Spark's short-circuiting behavior. If `expr1` is NULL the result is NULL, even when `expr2` is not NULL; a NULL `expr2` only matters when `expr1` is NaN. Both arguments are implicitly cast to DOUBLE (integer, DECIMAL and STRING arguments included); if both arguments are FLOAT the result is FLOAT, otherwise the result is DOUBLE. +/-Infinity and -0.0 are not NaN and are returned unchanged, with the sign of zero preserved.
+
+```sql
+nanvl(expr1, expr2)
+```
+
+### Arguments
+
+- **expr1**: Numeric expression, cast to DOUBLE (or FLOAT if both arguments are FLOAT). NULL returns NULL regardless of expr2.
+- **expr2**: Numeric expression, cast to match expr1. Only evaluated, and only matters, when expr1 is NaN.
+
+### Example
+
+```sql
+> SELECT nanvl(cast('NaN' as double), 123);
+123
+> SELECT nanvl(5.0, CAST(NULL AS DOUBLE));
+5
+> SELECT nanvl(CAST(NULL AS DOUBLE), 5.0);
+NULL
+> SELECT nanvl(CAST('NaN' AS DOUBLE), CAST('NaN' AS DOUBLE));
+NaN
 ```

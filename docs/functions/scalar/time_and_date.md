@@ -30,6 +30,7 @@ Part of the [datafusion-spark function reference](../README.md).
 - [last_day](#last_day)
 - [make_dt_interval](#make_dt_interval)
 - [make_interval](#make_interval)
+- [make_time](#make_time)
 - [minute](#minute)
 - [monthname](#monthname)
 - [next_day](#next_day)
@@ -160,7 +161,7 @@ NULL
 
 ## `date_part`
 
-Extracts a field from a date or timestamp, as an INT. Unlike DataFusion's `date_part`, it accepts Spark's field names and abbreviations (case-insensitive), and `DAYOFWEEK`/`DOW` counts from 1 (Sunday) to 7 (Saturday) where DataFusion's `dow` counts from 0 (Sunday). `DAYOFWEEK_ISO`/`DOW_ISO` counts from 1 (Monday) to 7 (Sunday), and `YEAROFWEEK` is the ISO week-numbering year. A field name Spark does not accept (such as `QUARTERS` or `DAYOFYEAR`) is an error at planning time. A NULL field or source returns NULL. `SECOND` returns whole seconds; Spark returns DECIMAL(8, 6) including the fraction of a second.
+Extracts a field from a date or timestamp, as an INT. Unlike DataFusion's `date_part`, it accepts Spark's field names and abbreviations (case-insensitive), and `DAYOFWEEK`/`DOW` counts from 1 (Sunday) to 7 (Saturday) where DataFusion's `dow` counts from 0 (Sunday). `DAYOFWEEK_ISO`/`DOW_ISO` counts from 1 (Monday) to 7 (Sunday), and `YEAROFWEEK` is the ISO week-numbering year. A field name Spark does not accept (such as `QUARTERS` or `DAYOFYEAR`) is an error. A NULL field or source returns NULL. `SECOND` returns whole seconds; Spark returns DECIMAL(8, 6) including the fraction of a second.
 
 ```sql
 date_part(field, source)
@@ -402,6 +403,33 @@ make_interval([years[, months[, weeks[, days[, hours[, mins[, secs]]]]]]])
 13 mons 8 days 1 hours 1 mins 1.000000000 secs
 > SELECT make_interval(2147483647, 1, 0, 0, 0, 0, 0.0);
 NULL
+```
+
+## `make_time`
+
+Creates a time of day from hour, minute and second fields. The result is a `Time64(Nanosecond)` with microsecond precision, like Spark's `TIME(6)`. Returns NULL if any argument is NULL. Out-of-range fields raise a `DATETIME_FIELD_OUT_OF_BOUNDS` error whether or not ANSI mode is enabled. Seconds that are negative or above 2147483647 are checked first, then hour, minute and second, so the error names the same field as Spark's. Arguments are cast to INT, INT and DECIMAL(16, 6) with DataFusion's cast rather than Spark's, so a value the cast cannot represent (an integer outside the INT range, a malformed string, seconds that do not fit DECIMAL(16, 6), NaN or Infinity) raises a cast error in both ANSI modes. With ANSI mode off Spark wraps the integer or returns NULL instead, and it returns NULL for NaN and Infinity in both modes (https://github.com/apache/datafusion-spark/issues/88).
+
+```sql
+make_time(hour, minute, second)
+```
+
+### Arguments
+
+- **hour**: Hour of the day, 0 to 23. Numeric and string values are cast to INT, and a fractional number is truncated.
+- **minute**: Minute of the hour, 0 to 59. Numeric and string values are cast to INT, and a fractional number is truncated.
+- **second**: Second of the minute with an optional fraction, 0 to 59.999999. Numeric and string values are cast to DECIMAL(16, 6), so extra fractional digits are rounded half up (59.9999995 becomes 60 and is out of range).
+
+### Example
+
+```sql
+> SELECT make_time(6, 30, 45.887);
+06:30:45.887
+> SELECT make_time(23, 59, 59.999999);
+23:59:59.999999
+> SELECT make_time(1, 18, NULL);
+NULL
+> SELECT make_time(24, 18, 19.87);
+-- error: Invalid value for HourOfDay (valid values 0 - 23): 24
 ```
 
 ## `minute`
