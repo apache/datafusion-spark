@@ -108,16 +108,19 @@ NULL
 
 # Spark's `ArrayRepeat` takes an INT count. An integer count of another type is
 # cast to INT, because DataFusion types `2` as BIGINT.
+# xfail spark: intended: Spark rejects a non-INT integer count, it is accepted here because DataFusion types an integer literal as BIGINT (https://github.com/apache/datafusion-spark/issues/97)
 query ?
 SELECT array_repeat('a', 2::TINYINT);
 ----
 [a, a]
 
+# xfail spark: intended: Spark rejects a non-INT integer count, it is accepted here because DataFusion types an integer literal as BIGINT (https://github.com/apache/datafusion-spark/issues/97)
 query ?
 SELECT array_repeat('a', 2::SMALLINT);
 ----
 [a, a]
 
+# xfail spark: intended: Spark rejects a non-INT integer count, it is accepted here because DataFusion types an integer literal as BIGINT (https://github.com/apache/datafusion-spark/issues/97)
 query ?
 SELECT array_repeat('a', 2::BIGINT);
 ----
@@ -136,6 +139,7 @@ NULL
 []
 
 # A dictionary-encoded integer count has the type of its values.
+# xfail spark: intended: Spark rejects a non-INT integer count, it is accepted here because DataFusion types an integer literal as BIGINT (https://github.com/apache/datafusion-spark/issues/97)
 query ?
 SELECT array_repeat('a', arrow_cast(2, 'Dictionary(Int32, Int64)'));
 ----
