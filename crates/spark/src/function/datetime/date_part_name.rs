@@ -36,8 +36,8 @@ pub(super) fn date_signature() -> Signature {
 
 /// One INT argument. Spark implicitly casts other numeric and string types to
 /// INT, and DataFusion types bare integer literals as BIGINT. The cast is
-/// DataFusion's, which errors where Spark with ANSI mode off returns NULL,
-/// wraps, or saturates (see <https://github.com/apache/datafusion-spark/issues/88>). A
+/// DataFusion's, which errors in cases where Spark with ANSI mode off returns a
+/// value or NULL (see <https://github.com/apache/datafusion-spark/issues/88>). A
 /// stopgap until input types are declared and coerced in one place
 /// (<https://github.com/apache/datafusion-spark/issues/346>).
 pub(super) fn int32_coercion() -> Coercion {

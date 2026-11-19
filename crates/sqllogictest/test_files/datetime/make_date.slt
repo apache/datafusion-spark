@@ -114,6 +114,13 @@ SELECT make_date('2024', '2', '3');
 # ----
 # NULL
 
+# Spark 4.2.0 truncates a string with a fractional part when ANSI mode is off; DataFusion errors
+# https://github.com/apache/datafusion-spark/issues/88
+# query D
+# SELECT make_date('2024.7', '1', '1');
+# ----
+# 2024-01-01
+
 # Spark 4.2.0 wraps an out-of-range BIGINT to INT when ANSI mode is off (giving an
 # invalid year and so NULL); DataFusion errors
 # https://github.com/apache/datafusion-spark/issues/88
