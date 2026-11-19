@@ -96,5 +96,5 @@ and the [DataFusion contributor guide](https://datafusion.apache.org/contributor
 [apache spark]: https://spark.apache.org/
 [apache datafusion comet]: https://datafusion.apache.org/comet/
 [api documentation]: https://docs.rs/datafusion-spark
-[function reference]: https://github.com/apache/datafusion-spark/blob/main/docs/functions.md
+[function reference]: https://github.com/apache/datafusion-spark/blob/main/docs/functions/README.md
 [`datafusion-spark` epic]: https://github.com/apache/datafusion/issues/15914

@@ -80,8 +80,8 @@ impl ScalarUDFImpl for SparkMyFunc {
 See `sha2` (`crates/spark/src/function/hash/sha2.rs`) and `substring`
 (`crates/spark/src/function/string/substring.rs`) for complete examples.
 
-The function reference in [`docs/functions.md`](docs/functions.md) is generated from these
-attributes. After adding or changing a function's documentation, regenerate it and commit the
+The function reference in [`docs/functions`](docs/functions/README.md) is generated from these
+attributes, with one page per function category. After adding or changing a function's documentation, regenerate it and commit the
 result (CI checks that it is up to date):
 
 ```shell

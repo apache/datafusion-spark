@@ -72,7 +72,7 @@
 //! [Apache DataFusion]: https://datafusion.apache.org/
 //! [Apache DataFusion Comet]: https://datafusion.apache.org/comet/
 //! [`datafusion-spark` epic]: https://github.com/apache/datafusion/issues/15914
-//! [function reference]: https://github.com/apache/datafusion-spark/blob/main/docs/functions.md
+//! [function reference]: https://github.com/apache/datafusion-spark/blob/main/docs/functions/README.md
 //!
 //! # Example: using all function packages
 //!

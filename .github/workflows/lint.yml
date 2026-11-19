@@ -60,11 +60,11 @@ jobs:
       - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
       - uses: Swatinem/rust-cache@v2
       - run: dev/update_function_docs.sh
-      - name: Check docs/functions.md is up to date
+      - name: Check docs/functions is up to date
         run: |
-          if [ -n "$(git status --porcelain -- docs/functions.md)" ]; then
-            git status --porcelain -- docs/functions.md
-            git diff -- docs/functions.md
-            echo "docs/functions.md is out of date. Run dev/update_function_docs.sh and commit the result."
+          if [ -n "$(git status --porcelain -- docs/functions)" ]; then
+            git status --porcelain -- docs/functions
+            git diff -- docs/functions
+            echo "docs/functions is out of date. Run dev/update_function_docs.sh and commit the result."
             exit 1
           fi
