@@ -235,6 +235,16 @@ FROM (VALUES (true), (false), (NULL::BOOLEAN)) AS t(a);
 1
 NULL
 
+query I
+SELECT find_in_set(X'62', 'a,b');
+----
+2
+
+query I
+SELECT find_in_set(DATE '2020-01-01', 'x,2020-01-01');
+----
+2
+
 query III
 SELECT find_in_set(NULL, 'a'), find_in_set('a', NULL), find_in_set(NULL, NULL);
 ----
@@ -268,6 +278,6 @@ FROM (VALUES ('b', 'a,b'), (NULL::STRING, 'a,b')) AS t(a, b);
 Int32
 Int32
 
-# xfail spark: DataFusion SQL does not support explicit collations.
+# xfail spark: collations are not supported yet (https://github.com/apache/datafusion-spark/issues/299).
 statement error Unsupported ast node in sqltorel: Collate
 SELECT find_in_set('B' COLLATE UTF8_LCASE, 'a,b');
