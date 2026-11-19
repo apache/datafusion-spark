@@ -49,7 +49,7 @@ let ctx = SessionContext::new_with_state(state);
 let df = ctx.sql("SELECT sha2('Spark', 256)").await?;
 ```
 
-See the [function reference](docs/functions.md) for the available functions, the
+See the [function reference](docs/functions.md) for the documented functions, the
 [crate README](crates/spark/README.md) and the [API documentation](https://docs.rs/datafusion-spark)
 for more.
 

@@ -62,7 +62,9 @@ jobs:
       - run: dev/update_function_docs.sh
       - name: Check docs/functions.md is up to date
         run: |
-          if ! git diff --exit-code -- docs/functions.md; then
+          if [ -n "$(git status --porcelain -- docs/functions.md)" ]; then
+            git status --porcelain -- docs/functions.md
+            git diff -- docs/functions.md
             echo "docs/functions.md is out of date. Run dev/update_function_docs.sh and commit the result."
             exit 1
           fi

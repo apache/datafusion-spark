@@ -15,6 +15,10 @@ cd "${ROOT_DIR}"
 TARGET_FILE="docs/functions.md"
 mkdir -p "$(dirname "${TARGET_FILE}")"
 
+# Generate into a temporary file so a failed build leaves the existing reference untouched.
+TMP_FILE="$(mktemp "${TARGET_FILE}.XXXXXX")"
+trap 'rm -f "${TMP_FILE}"' EXIT
+
 {
   cat <<'HEADER'
 <!--
@@ -35,6 +39,9 @@ Functions in this crate emulate Apache Spark's behavior. Each entry describes ho
 differs from the DataFusion built-in of the same name, if there is one.
 HEADER
   cargo run --quiet -p datafusion-spark-docgen --bin print_functions_docs
-} > "${TARGET_FILE}"
+} > "${TMP_FILE}"
+
+chmod 644 "${TMP_FILE}"
+mv "${TMP_FILE}" "${TARGET_FILE}"
 
 echo "Wrote ${TARGET_FILE}"

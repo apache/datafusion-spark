@@ -47,7 +47,7 @@
 //!
 //! Not every Spark function is implemented yet; coverage is growing. The
 //! [`datafusion-spark` epic] tracks progress. The [function reference] lists
-//! the available functions with their descriptions, arguments and examples.
+//! the documented functions with their descriptions, arguments and examples.
 //!
 //! # Semantics and caveats
 //!
