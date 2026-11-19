@@ -41,6 +41,9 @@ SELECT make_date(2023, 2, 29), make_date(1900, 2, 29), make_date(2023, 2, 30),
 NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL
 
 # Years outside 0001-9999 are accepted; year 0 is 1 BC
+# `unix_date` has no `invoke_with_args` yet, so this is skipped in evaluate mode
+# (https://github.com/apache/datafusion-spark/issues/306).
+skipif evaluate
 query IIIIII
 SELECT unix_date(make_date(0, 1, 1)), unix_date(make_date(-1, 1, 1)),
   unix_date(make_date(300000, 6, 15)), unix_date(make_date(300000, 2, 29)),
@@ -107,59 +110,39 @@ SELECT make_date('2024', '2', '3');
 ----
 2024-02-03
 
-# Spark 4.2.0 returns NULL for a malformed string when ANSI mode is off; DataFusion errors
-# https://github.com/apache/datafusion-spark/issues/88
-# query D
-# SELECT make_date('abc', '2', '3');
-# ----
-# NULL
+# With ANSI mode off, Spark's cast to INT returns a value or NULL where DataFusion's errors
 
-# Spark 4.2.0 truncates a string with a fractional part when ANSI mode is off; DataFusion errors
-# https://github.com/apache/datafusion-spark/issues/88
-# query D
-# SELECT make_date('2024.7', '1', '1');
-# ----
-# 2024-01-01
+# xfail spark: Spark returns NULL for a malformed string, DataFusion's cast errors (https://github.com/apache/datafusion-spark/issues/88)
+query error Cannot cast string 'abc' to value of Int32 type
+SELECT make_date('abc', '2', '3');
 
-# Spark 4.2.0 wraps an out-of-range BIGINT to INT when ANSI mode is off (giving an
-# invalid year and so NULL); DataFusion errors
-# https://github.com/apache/datafusion-spark/issues/88
-# query D
-# SELECT make_date(3000000000, 1, 1);
-# ----
-# NULL
+# xfail spark: Spark truncates a string with a fractional part, giving 2024-01-01, DataFusion's cast errors (https://github.com/apache/datafusion-spark/issues/88)
+query error Cannot cast string '2024\.7' to value of Int32 type
+SELECT make_date('2024.7', '1', '1');
 
-# When ANSI mode is off, Spark 4.2.0 casts NaN to 0, and saturates a DOUBLE out of the
-# INT range to 2147483647 (never a valid year, so NULL); DataFusion errors
-# https://github.com/apache/datafusion-spark/issues/88
-# query D
-# SELECT make_date(CAST('NaN' AS DOUBLE), 1, 1);
-# ----
-# 0000-01-01
-#
-# query D
-# SELECT make_date(CAST('Infinity' AS DOUBLE), 1, 1);
-# ----
-# NULL
-#
-# query D
-# SELECT make_date(CAST(1e10 AS DOUBLE), 1, 1);
-# ----
-# NULL
+# xfail spark: Spark wraps an out-of-range BIGINT to INT, an invalid year, so NULL, DataFusion's cast errors (https://github.com/apache/datafusion-spark/issues/88)
+query error Can't cast value 3000000000 to type Int32
+SELECT make_date(3000000000, 1, 1);
 
-# When ANSI mode is off, Spark 4.2.0 wraps an out-of-range DECIMAL to INT like a BIGINT
-# (toLong.toInt): 4294969320 wraps to 2024, while 99999999999 wraps to 1215752191, an
-# invalid year; DataFusion errors
-# https://github.com/apache/datafusion-spark/issues/88
-# query D
-# SELECT make_date(CAST(4294969320 AS DECIMAL(20,0)), 1, 1);
-# ----
-# 2024-01-01
-#
-# query D
-# SELECT make_date(CAST(99999999999 AS DECIMAL(20,0)), 1, 1);
-# ----
-# NULL
+# xfail spark: Spark casts NaN to 0, giving 0000-01-01, DataFusion's cast errors (https://github.com/apache/datafusion-spark/issues/88)
+query error Can't cast value NaN to type Int32
+SELECT CAST(make_date(CAST('NaN' AS DOUBLE), 1, 1) AS STRING);
+
+# xfail spark: Spark saturates an out-of-range DOUBLE to 2147483647, an invalid year, so NULL, DataFusion's cast errors (https://github.com/apache/datafusion-spark/issues/88)
+query error Can't cast value inf to type Int32
+SELECT make_date(CAST('Infinity' AS DOUBLE), 1, 1);
+
+# xfail spark: Spark saturates an out-of-range DOUBLE to 2147483647, an invalid year, so NULL, DataFusion's cast errors (https://github.com/apache/datafusion-spark/issues/88)
+query error Can't cast value 10000000000\.0 to type Int32
+SELECT make_date(CAST(1e10 AS DOUBLE), 1, 1);
+
+# xfail spark: Spark wraps an out-of-range DECIMAL like a BIGINT (toLong.toInt), so 4294969320 gives 2024-01-01, DataFusion's cast errors (https://github.com/apache/datafusion-spark/issues/88)
+query error value of 4294969320 is out of range Int32
+SELECT make_date(CAST(4294969320 AS DECIMAL(20,0)), 1, 1);
+
+# xfail spark: Spark wraps an out-of-range DECIMAL like a BIGINT (toLong.toInt), to 1215752191, an invalid year, so NULL, DataFusion's cast errors (https://github.com/apache/datafusion-spark/issues/88)
+query error value of 99999999999 is out of range Int32
+SELECT make_date(CAST(99999999999 AS DECIMAL(20,0)), 1, 1);
 
 # BOOLEAN is not accepted
 query error
