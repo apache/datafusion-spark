@@ -220,3 +220,54 @@ SELECT find_in_set(arrow_cast(a, 'LargeUtf8'), arrow_cast('abc,b,ab,c,def', 'Lar
 3
 0
 NULL
+
+# Spark implicitly casts both arguments to strings.
+query II
+SELECT find_in_set(2::INT, '1,2,3'), find_in_set('2', 2::INT);
+----
+2 1
+
+query I
+SELECT find_in_set(a, 'false,true')
+FROM (VALUES (true), (false), (NULL::BOOLEAN)) AS t(a);
+----
+2
+1
+NULL
+
+query III
+SELECT find_in_set(NULL, 'a'), find_in_set('a', NULL), find_in_set(NULL, NULL);
+----
+NULL NULL NULL
+
+query I
+SELECT find_in_set(arrow_cast(a, 'LargeUtf8'), arrow_cast(b, 'Utf8View'))
+FROM (VALUES ('b', 'a,b'), ('界', 'a,界'), (NULL::STRING, 'a,b')) AS t(a, b);
+----
+2
+2
+NULL
+
+query I
+SELECT find_in_set(arrow_cast(a, 'Dictionary(Int8, Utf8)'), b)
+FROM (VALUES ('b', 'a,b'), ('a', 'a,a'), (NULL::STRING, 'a,b')) AS t(a, b);
+----
+2
+1
+NULL
+
+query T
+SELECT arrow_typeof(find_in_set(arrow_cast('b', 'LargeUtf8'), 'a,b'));
+----
+Int32
+
+query T rowsort
+SELECT arrow_typeof(find_in_set(arrow_cast(a, 'LargeUtf8'), b))
+FROM (VALUES ('b', 'a,b'), (NULL::STRING, 'a,b')) AS t(a, b);
+----
+Int32
+Int32
+
+# xfail spark: DataFusion SQL does not support explicit collations.
+statement error Unsupported ast node in sqltorel: Collate
+SELECT find_in_set('B' COLLATE UTF8_LCASE, 'a,b');

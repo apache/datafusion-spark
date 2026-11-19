@@ -13,6 +13,7 @@ pub mod concat_ws;
 pub mod contains;
 pub mod elt;
 pub mod encode;
+pub mod find_in_set;
 pub mod format_string;
 pub mod ilike;
 pub mod is_valid_utf8;
@@ -40,6 +41,7 @@ make_udf_function!(ilike::SparkILike, ilike);
 make_udf_function!(length::SparkLengthFunc, length);
 make_udf_function!(elt::SparkElt, elt);
 make_udf_function!(encode::SparkEncode, encode);
+make_udf_function!(find_in_set::SparkFindInSet, find_in_set);
 make_udf_function!(like::SparkLike, like);
 make_udf_function!(luhn_check::SparkLuhnCheck, luhn_check);
 make_udf_function!(format_string::FormatStringFunc, format_string);
@@ -95,6 +97,11 @@ pub mod expr_fn {
         encode,
         "Encodes a string or binary value into binary using the specified character encoding.",
         string_or_binary charset
+    ));
+    export_functions!((
+        find_in_set,
+        "Returns the 1-based position of the first match in a comma-separated list, or 0.",
+        str strlist
     ));
     export_functions!((
         ilike,
@@ -170,6 +177,7 @@ pub fn functions() -> Vec<Arc<ScalarUDF>> {
         contains(),
         elt(),
         encode(),
+        find_in_set(),
         ilike(),
         length(),
         like(),
