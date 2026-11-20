@@ -8,7 +8,194 @@
 # For more information, please see:
 #   https://github.com/apache/datafusion/issues/15914
 
-## Original Query: SELECT timestamp_millis(1230219000123);
-## PySpark 3.5.5 Result: {'timestamp_millis(1230219000123)': datetime.datetime(2008, 12, 25, 7, 30, 0, 123000), 'typeof(timestamp_millis(1230219000123))': 'timestamp', 'typeof(1230219000123)': 'bigint'}
-#query
-#SELECT timestamp_millis(1230219000123::bigint);
+# Audited against Spark 4.2.0 on 2026-11-20.
+# Expected values verified with pyspark==4.2.0.
+
+# Milliseconds are measured from the UTC epoch, including negative values.
+query PPPP
+SELECT timestamp_millis(0::BIGINT), timestamp_millis(-1::BIGINT),
+  timestamp_millis(1230219000123::BIGINT), timestamp_millis(-1230219000123::BIGINT);
+----
+1970-01-01T00:00:00Z 1969-12-31T23:59:59.999Z 2008-12-25T15:30:00.123Z 1931-01-07T08:29:59.877Z
+
+query PPPP
+SELECT timestamp_millis(1::TINYINT) AS tiny, timestamp_millis(1::SMALLINT) AS small,
+  timestamp_millis(1::INT) AS integer_value, timestamp_millis(1::BIGINT) AS big;
+----
+1970-01-01T00:00:00.001Z 1970-01-01T00:00:00.001Z 1970-01-01T00:00:00.001Z 1970-01-01T00:00:00.001Z
+
+query PP
+SELECT timestamp_millis(NULL) AS untyped_null, timestamp_millis(NULL::BIGINT) AS typed_null;
+----
+NULL NULL
+
+# Column input exercises the physical kernel in both SLT modes.
+query PII
+SELECT timestamp_millis(x), unix_micros(timestamp_millis(x)), unix_millis(timestamp_millis(x))
+FROM (VALUES (-1::BIGINT), (0::BIGINT), (1::BIGINT), (NULL::BIGINT)) AS t(x);
+----
+1969-12-31T23:59:59.999Z -1000 -1
+1970-01-01T00:00:00Z 0 0
+1970-01-01T00:00:00.001Z 1000 1
+NULL NULL NULL
+
+query PPP
+SELECT timestamp_millis(a), timestamp_millis(b), timestamp_millis(c)
+FROM (VALUES ((-128)::TINYINT, (-32768)::SMALLINT, (-2147483648)::INT)) AS t(a, b, c);
+----
+1969-12-31T23:59:59.872Z 1969-12-31T23:59:27.232Z 1969-12-07T03:28:36.352Z
+
+# Both inclusive millisecond limits are valid, even though their years cannot
+# be rendered by the calendar formatter. Verify the stored count and round trip.
+query II
+SELECT unix_micros(timestamp_millis(x)), unix_millis(timestamp_millis(x))
+FROM (VALUES ((-9223372036854775)::BIGINT), (9223372036854775::BIGINT)) AS t(x);
+----
+-9223372036854775000 -9223372036854775
+9223372036854775000 9223372036854775
+
+query I
+SELECT unix_micros(timestamp_millis(arrow_cast(x, 'Dictionary(Int32, Int64)')))
+FROM (VALUES (-1::BIGINT), (1::BIGINT), (NULL::BIGINT)) AS t(x);
+----
+-1000
+1000
+NULL
+
+query P
+SELECT timestamp_millis(x) FROM (VALUES (NULL::BIGINT), (NULL::BIGINT)) AS t(x);
+----
+NULL
+NULL
+
+# ExpectsInputTypes rejects these types rather than implicitly casting them.
+query error The first parameter of `timestamp_millis` requires the "INTEGRAL" type, however it has the type "DOUBLE".
+SELECT timestamp_millis(1.0::DOUBLE);
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_millis(1.0::FLOAT);
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_millis(1.0::DECIMAL(10, 1));
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_millis('1');
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_millis(true);
+
+# Multiplication overflows on either side of the valid range, even without ANSI.
+query error long overflow
+SELECT timestamp_millis(9223372036854776::BIGINT);
+
+query error long overflow
+SELECT timestamp_millis((-9223372036854776)::BIGINT);
+
+query error long overflow
+SELECT timestamp_millis(9223372036854775807::BIGINT);
+
+query error long overflow
+SELECT timestamp_millis((-9223372036854775808)::BIGINT);
+
+query error long overflow
+SELECT unix_micros(timestamp_millis(x))
+FROM (VALUES (1::BIGINT), (9223372036854776::BIGINT), (NULL::BIGINT)) AS t(x);
+
+query error long overflow
+SELECT unix_micros(timestamp_millis(x))
+FROM (VALUES ((-9223372036854776)::BIGINT), (1::BIGINT)) AS t(x);
+
+statement ok
+SET datafusion.execution.enable_ansi_mode = true;
+
+query II
+SELECT unix_micros(timestamp_millis((-9223372036854775)::BIGINT)),
+  unix_micros(timestamp_millis(9223372036854775::BIGINT));
+----
+-9223372036854775000 9223372036854775000
+
+query P
+SELECT timestamp_millis(-1::BIGINT);
+----
+1969-12-31T23:59:59.999Z
+
+query error long overflow
+SELECT timestamp_millis(9223372036854776::BIGINT);
+
+query error long overflow
+SELECT timestamp_millis((-9223372036854776)::BIGINT);
+
+query error long overflow
+SELECT timestamp_millis(9223372036854775807::BIGINT);
+
+query error long overflow
+SELECT timestamp_millis((-9223372036854775808)::BIGINT);
+
+query error long overflow
+SELECT unix_micros(timestamp_millis(x))
+FROM (VALUES (1::BIGINT), (9223372036854776::BIGINT), (NULL::BIGINT)) AS t(x);
+
+query error long overflow
+SELECT unix_micros(timestamp_millis(x))
+FROM (VALUES ((-9223372036854776)::BIGINT), (1::BIGINT)) AS t(x);
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_millis(1.0::DOUBLE);
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_millis(1.0::FLOAT);
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_millis(1.0::DECIMAL(10, 1));
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_millis('1');
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_millis(true);
+
+statement ok
+SET datafusion.execution.enable_ansi_mode = false;
+
+# The session zone affects display, but never the stored microsecond count.
+statement ok
+SET datafusion.execution.time_zone = 'America/Los_Angeles';
+
+query PP
+SELECT timestamp_millis(1230219000123::BIGINT), timestamp_millis(-1230219000123::BIGINT);
+----
+2008-12-25T07:30:00.123-08:00 1931-01-07T00:29:59.877-08:00
+
+query PII
+SELECT timestamp_millis(x), unix_micros(timestamp_millis(x)), unix_millis(timestamp_millis(x))
+FROM (VALUES (1710064799999::BIGINT), (1710064800000::BIGINT)) AS t(x);
+----
+2024-03-10T01:59:59.999-08:00 1710064799999000 1710064799999
+2024-03-10T03:00:00-07:00 1710064800000000 1710064800000
+
+statement ok
+SET datafusion.execution.time_zone = 'UTC';
+
+# Arrow-specific assertions supplement the Spark comparisons.
+query T
+SELECT arrow_typeof(timestamp_millis(0::BIGINT));
+----
+Timestamp(µs, "UTC")
+
+query III
+SELECT unix_micros(timestamp_millis(arrow_cast(255, 'UInt8'))),
+  unix_micros(timestamp_millis(arrow_cast(65535, 'UInt16'))),
+  unix_micros(timestamp_millis(arrow_cast(4294967295, 'UInt32')));
+----
+255000 65535000 4294967295000
+
+query I
+SELECT unix_micros(timestamp_millis(arrow_cast(x, 'Dictionary(Int32, UInt32)')))
+FROM (VALUES (0::BIGINT), (4294967295::BIGINT), (NULL::BIGINT)) AS t(x);
+----
+0
+4294967295000
+NULL
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_millis(arrow_cast(1, 'UInt64'));

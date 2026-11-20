@@ -25,6 +25,7 @@ Part of the [datafusion-spark function reference](../README.md).
 - [datediff](#datediff)
 - [datepart](#datepart)
 - [dayname](#dayname)
+- [dayofweek](#dayofweek)
 - [from_utc_timestamp](#from_utc_timestamp)
 - [hour](#hour)
 - [last_day](#last_day)
@@ -38,6 +39,7 @@ Part of the [datafusion-spark function reference](../README.md).
 - [second](#second)
 - [time_trunc](#time_trunc)
 - [timestamp_micros](#timestamp_micros)
+- [timestamp_millis](#timestamp_millis)
 - [to_utc_timestamp](#to_utc_timestamp)
 - [trunc](#trunc)
 - [unix_date](#unix_date)
@@ -281,6 +283,31 @@ Wed
 > SELECT dayname(arrow_cast('2024-05-20 23:59:59', 'Timestamp(Microsecond, None)'));
 Mon
 > SELECT dayname(NULL::DATE);
+NULL
+```
+
+## `dayofweek`
+
+Returns the day of the week as an INT from 1 (Sunday) to 7 (Saturday). This differs from `weekday`, which counts from 0 (Monday) to 6 (Sunday), and from DataFusion's `date_part('dow', ...)`, which counts from 0 (Sunday) to 6 (Saturday). DataFusion has no built-in `dayofweek`. Strings are implicitly cast to DATE. A malformed string is an error, even with ANSI mode off where Spark returns NULL. A string that Spark reads as a partial date, such as '2009' or '2009-07', is also an error, where Spark uses the first day of that year or month. Timestamps are cast to DATE first, so the time of day is ignored. A timestamp with a time zone is converted in its own time zone, not the session time zone that Spark uses. Returns NULL if the input is NULL.
+
+```sql
+dayofweek(date)
+```
+
+### Arguments
+
+- **date**: DATE, TIMESTAMP or string expression. NULL returns NULL.
+
+### Example
+
+```sql
+> SELECT dayofweek('2009-07-30'::DATE);
+5
+> SELECT dayofweek('2009-07-30');
+5
+> SELECT dayofweek(arrow_cast('2024-01-07 23:59:59', 'Timestamp(Microsecond, None)'));
+1
+> SELECT dayofweek(NULL::DATE);
 NULL
 ```
 
@@ -596,6 +623,29 @@ timestamp_micros(microseconds)
 > SELECT timestamp_micros(-1::BIGINT);
 1969-12-31T23:59:59.999999Z
 > SELECT timestamp_micros(NULL);
+NULL
+```
+
+## `timestamp_millis`
+
+Returns the timestamp that is `milliseconds` milliseconds after 1970-01-01 00:00:00 UTC. Negative values precede the epoch. Unlike DataFusion's `to_timestamp_millis`, the result has microsecond precision, non-integer inputs are rejected, and scaling to microseconds raises `long overflow` on overflow in both ANSI and non-ANSI modes. Valid millisecond counts range from -9223372036854775 through 9223372036854775, inclusive. The result uses the session time zone (`datafusion.execution.time_zone`, default UTC), which affects display but not the stored count. Returns NULL for NULL input.
+
+```sql
+timestamp_millis(milliseconds)
+```
+
+### Arguments
+
+- **milliseconds**: TINYINT, SMALLINT, INT or BIGINT count of milliseconds since the UTC epoch. Arrow UInt8, UInt16 and UInt32 inputs are also accepted. UInt64 is rejected because its full range cannot fit in BIGINT. NULL returns NULL.
+
+### Example
+
+```sql
+> SELECT timestamp_millis(0::BIGINT);
+1970-01-01T00:00:00Z
+> SELECT timestamp_millis(-1::BIGINT);
+1969-12-31T23:59:59.999Z
+> SELECT timestamp_millis(NULL);
 NULL
 ```
 
