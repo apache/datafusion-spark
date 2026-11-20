@@ -126,14 +126,14 @@ impl ScalarUDFImpl for SparkToJson {
         let [field] = take_function_args(self.name(), arg_fields)?;
 
         match input {
-            ColumnarValue::Array(array) => Ok(ColumnarValue::Array(struct_to_json(
+            ColumnarValue::Array(array) => Ok(ColumnarValue::Array(to_json(
                 &field,
                 &array,
                 &config_options,
             )?)),
             ColumnarValue::Scalar(scalar) => {
                 let array = scalar.to_array()?;
-                let result = struct_to_json(&field, &array, &config_options)?;
+                let result = to_json(&field, &array, &config_options)?;
                 Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(
                     &result, 0,
                 )?))
@@ -205,14 +205,15 @@ fn check_spark_json_type(data_type: &DataType, path: &str) -> Result<()> {
     }
 }
 
-/// Serializes every row of a struct array as a JSON object string; a NULL
-/// struct row produces NULL. `field` describes `array` and supplies the JSON
-/// keys of nested fields.
+/// Serializes every row of a struct, map or list array as a JSON string: an
+/// object for a struct or a map, an array for a list. A NULL row produces
+/// NULL. `field` describes `array` and supplies the JSON keys of nested
+/// fields.
 ///
 /// The arrow-json row encoder is built once per batch and each row is written
 /// straight into a `StringBuilder`; the Spark-specific rules are supplied by
 /// `SparkJsonEncoderFactory`.
-fn struct_to_json(
+fn to_json(
     field: &FieldRef,
     array: &ArrayRef,
     config: &ConfigOptions,
@@ -945,11 +946,11 @@ mod tests {
     use arrow::array::{
         BinaryArray, BinaryBuilder, BinaryViewArray, BooleanArray, Date32Array,
         Date64Array, Decimal32Array, Decimal128Array, Decimal256Array, DictionaryArray,
-        FixedSizeBinaryArray, Float32Array, Float64Array, Float64Builder, Int32Array,
-        Int32Builder, Int64Array, LargeBinaryArray, LargeStringArray, ListArray,
-        ListBuilder, MapBuilder, StringArray, StringViewArray, StructArray,
-        TimestampMicrosecondArray, TimestampNanosecondArray, TimestampSecondArray,
-        UInt8Array,
+        FixedSizeBinaryArray, FixedSizeListArray, Float32Array, Float64Array,
+        Float64Builder, Int32Array, Int32Builder, Int64Array, LargeBinaryArray,
+        LargeListArray, LargeStringArray, ListArray, ListBuilder, MapBuilder,
+        StringArray, StringViewArray, StructArray, TimestampMicrosecondArray,
+        TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
     };
     use arrow::buffer::NullBuffer;
     use arrow::datatypes::{
@@ -1000,8 +1001,34 @@ mod tests {
         StructArray::new(fields, vec![a, b, c], Some(nulls))
     }
 
-    fn field_of(array: &StructArray) -> FieldRef {
+    fn field_of(array: &dyn Array) -> FieldRef {
         Field::new("s", array.data_type().clone(), true).into()
+    }
+
+    /// Map<Utf8, Int32> rows: {"a":1,"b":null}, {}, NULL, {"c":3}
+    fn sample_map() -> MapArray {
+        let mut mb = MapBuilder::new(None, StringBuilder::new(), Int32Builder::new());
+        mb.keys().append_value("a");
+        mb.values().append_value(1);
+        mb.keys().append_value("b");
+        mb.values().append_null();
+        mb.append(true).unwrap();
+        mb.append(true).unwrap();
+        mb.append(false).unwrap();
+        mb.keys().append_value("c");
+        mb.values().append_value(3);
+        mb.append(true).unwrap();
+        mb.finish()
+    }
+
+    /// List<Int32> rows: [1,null,3], [], NULL, [4]
+    fn sample_list() -> ListArray {
+        ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+            Some(vec![Some(1), None, Some(3)]),
+            Some(vec![]),
+            None,
+            Some(vec![Some(4)]),
+        ])
     }
 
     #[test]
@@ -1255,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array_input() {
+    fn test_struct_array_input() {
         let input = sample_struct();
         let field = field_of(&input);
         let out = run(ColumnarValue::Array(Arc::new(input)), field).unwrap();
@@ -1270,7 +1297,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scalar_input() {
+    fn test_struct_scalar_input() {
         let input = sample_struct();
         let field = field_of(&input);
         let scalar = ScalarValue::Struct(Arc::new(input.slice(0, 1)));
@@ -1290,6 +1317,145 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         assert!(out.is_null(0));
+    }
+
+    #[test]
+    fn test_map_input() {
+        let input = sample_map();
+        let field = field_of(&input);
+        let out = run(ColumnarValue::Array(Arc::new(input)), field).unwrap();
+        let out = as_string_array(&out).unwrap();
+
+        assert_eq!(out.len(), 4);
+        // NULL map values are kept, as in a nested map
+        assert_eq!(out.value(0), r#"{"a":1,"b":null}"#);
+        assert_eq!(out.value(1), "{}");
+        // NULL map row -> NULL
+        assert!(out.is_null(2));
+        assert_eq!(out.value(3), r#"{"c":3}"#);
+    }
+
+    #[test]
+    fn test_list_input() {
+        let input = sample_list();
+        let field = field_of(&input);
+        let out = run(ColumnarValue::Array(Arc::new(input)), field).unwrap();
+        let out = as_string_array(&out).unwrap();
+
+        assert_eq!(out.len(), 4);
+        // NULL elements are written as null
+        assert_eq!(out.value(0), "[1,null,3]");
+        assert_eq!(out.value(1), "[]");
+        // NULL list row -> NULL
+        assert!(out.is_null(2));
+        assert_eq!(out.value(3), "[4]");
+    }
+
+    #[test]
+    fn test_map_scalar_input() {
+        let input = sample_map();
+        let field = field_of(&input);
+
+        let scalar = ScalarValue::Map(Arc::new(input.slice(0, 1)));
+        let out = run(ColumnarValue::Scalar(scalar), Arc::clone(&field)).unwrap();
+        let out = as_string_array(&out).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.value(0), r#"{"a":1,"b":null}"#);
+
+        // a NULL map scalar produces NULL
+        let scalar = ScalarValue::Map(Arc::new(input.slice(2, 1)));
+        let out = run(ColumnarValue::Scalar(scalar), field).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out.is_null(0));
+    }
+
+    #[test]
+    fn test_list_scalar_input() {
+        let input = sample_list();
+        let field = field_of(&input);
+
+        let scalar = ScalarValue::List(Arc::new(input.slice(0, 1)));
+        let out = run(ColumnarValue::Scalar(scalar), Arc::clone(&field)).unwrap();
+        let out = as_string_array(&out).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.value(0), "[1,null,3]");
+
+        // a NULL list scalar produces NULL
+        let scalar = ScalarValue::List(Arc::new(input.slice(2, 1)));
+        let out = run(ColumnarValue::Scalar(scalar), field).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out.is_null(0));
+    }
+
+    #[test]
+    fn test_sliced_map_and_list_input() {
+        // rows 1..4 of each sample, through a non-zero-offset slice
+        let map = sample_map();
+        let field = field_of(&map);
+        let sliced = map.slice(1, 3);
+        let out = run(ColumnarValue::Array(Arc::new(sliced)), field).unwrap();
+        let out = as_string_array(&out).unwrap();
+
+        assert_eq!(out.len(), 3);
+        assert_eq!(out.value(0), "{}");
+        assert!(out.is_null(1));
+        assert_eq!(out.value(2), r#"{"c":3}"#);
+
+        let list = sample_list();
+        let field = field_of(&list);
+        let sliced = list.slice(1, 3);
+        let out = run(ColumnarValue::Array(Arc::new(sliced)), field).unwrap();
+        let out = as_string_array(&out).unwrap();
+
+        assert_eq!(out.len(), 3);
+        assert_eq!(out.value(0), "[]");
+        assert!(out.is_null(1));
+        assert_eq!(out.value(2), "[4]");
+    }
+
+    #[test]
+    fn test_list_of_structs_input() {
+        // one row: [{a: 1}, {a: NULL}, NULL]
+        let a = Arc::new(Int32Array::from(vec![Some(1), None, None])) as ArrayRef;
+        let fields = Fields::from(vec![Field::new("a", DataType::Int32, true)]);
+        let nulls = NullBuffer::from(vec![true, true, false]);
+        let structs = StructArray::new(fields, vec![a], Some(nulls));
+        let item = Arc::new(Field::new("item", structs.data_type().clone(), true));
+        let offsets = OffsetBuffer::new(vec![0, 3].into());
+        let input = ListArray::new(item, offsets, Arc::new(structs), None);
+        let field = field_of(&input);
+
+        let out = run(ColumnarValue::Array(Arc::new(input)), field).unwrap();
+        let out = as_string_array(&out).unwrap();
+
+        // NULL struct fields are omitted inside an array as well, while a NULL
+        // element is written as null
+        assert_eq!(out.value(0), r#"[{"a":1},{},null]"#);
+    }
+
+    #[test]
+    fn test_large_and_fixed_size_list_input() {
+        // the same rows as two other Arrow list types
+        let rows = vec![
+            Some(vec![Some(1), None]),
+            None,
+            Some(vec![Some(3), Some(4)]),
+            Some(vec![Some(5), Some(6)]),
+        ];
+        let large = LargeListArray::from_iter_primitive::<Int32Type, _, _>(rows.clone());
+        let fixed = FixedSizeListArray::from_iter_primitive::<Int32Type, _, _>(rows, 2);
+
+        for input in [Arc::new(large) as ArrayRef, Arc::new(fixed) as ArrayRef] {
+            let field = field_of(&input);
+            let out = run(ColumnarValue::Array(input), field).unwrap();
+            let out = as_string_array(&out).unwrap();
+
+            assert_eq!(out.len(), 4);
+            assert_eq!(out.value(0), "[1,null]");
+            assert!(out.is_null(1));
+            assert_eq!(out.value(2), "[3,4]");
+            assert_eq!(out.value(3), "[5,6]");
+        }
     }
 
     #[test]
@@ -1781,8 +1947,9 @@ mod tests {
             Field::new("ltz", ltz.data_type().clone(), true),
             Field::new("ntz", ntz.data_type().clone(), true),
         ]);
-        let input = Arc::new(StructArray::new(fields, vec![ltz, ntz], None));
+        let input = StructArray::new(fields, vec![ltz, ntz], None);
         let field = field_of(&input);
+        let input = Arc::new(input);
 
         // default session time zone (UTC): milliseconds, offset written as `Z`
         let out = run(
@@ -2067,6 +2234,8 @@ mod dataframe_tests {
     use datafusion_common::{assert_batches_sorted_eq, assert_contains};
     use datafusion_functions_nested::expr_fn::make_array;
 
+    // the expression builder; it takes precedence over the `to_json` helper
+    // that `super::*` brings in
     use crate::function::json::expr_fn::to_json;
 
     /// id  foo  bar
