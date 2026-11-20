@@ -353,7 +353,7 @@ SELECT to_json(named_struct('s', arrow_cast('a', 'Dictionary(Int32, Utf8)')));
 
 ## Errors
 
-query error Error during planning: to_json expects a struct argument, got Utf8
+query error Error during planning: to_json expects a struct, map or array argument, got Utf8
 SELECT to_json('abc'::STRING);
 
 query error 'to_json' does not support zero arguments

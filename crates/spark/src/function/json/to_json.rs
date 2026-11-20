@@ -104,13 +104,10 @@ impl ScalarUDFImpl for SparkToJson {
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         match arg_types {
-            [DataType::Struct(fields)] => {
-                for field in fields {
-                    check_spark_json_type(field.data_type(), field.name())?;
-                }
+            [input] => {
+                check_input_type(input)?;
                 Ok(DataType::Utf8)
             }
-            [other] => plan_err!("to_json expects a struct argument, got {other}"),
             _ => plan_err!(
                 "to_json expects exactly one argument, got {}",
                 arg_types.len()
@@ -145,8 +142,28 @@ impl ScalarUDFImpl for SparkToJson {
     }
 }
 
+/// Checks the type of the value passed to to_json. Spark accepts a struct, a
+/// map or an array; their fields, keys, values and elements are checked with
+/// `check_spark_json_type`.
+fn check_input_type(data_type: &DataType) -> Result<()> {
+    use DataType::*;
+    match data_type {
+        // each field is reported under its own name
+        Struct(fields) => fields.iter().try_for_each(|f| {
+            check_spark_json_type(f.data_type(), &format!("field {}", f.name()))
+        }),
+        // a map or an array has no field name, so its path starts at `input`
+        Map(..) | List(_) | LargeList(_) | FixedSizeList(..) | ListView(_)
+        | LargeListView(_) => check_spark_json_type(data_type, "input"),
+        other => {
+            plan_err!("to_json expects a struct, map or array argument, got {other}")
+        }
+    }
+}
+
 /// Rejects types that have no faithful Spark JSON text. `path` names the
-/// field in the error (`a.b[]` for the elements of list `b` in struct `a`).
+/// value in the error: `field a.b[]` for the elements of list `b` in struct
+/// field `a`, `input[]` for the elements of an array passed to to_json.
 fn check_spark_json_type(data_type: &DataType, path: &str) -> Result<()> {
     use DataType::*;
     match data_type {
@@ -166,11 +183,11 @@ fn check_spark_json_type(data_type: &DataType, path: &str) -> Result<()> {
         }),
         Map(entries, _) => {
             let Struct(kv) = entries.data_type() else {
-                return plan_err!("to_json: field {path} is a map without entries");
+                return plan_err!("to_json: {path} is a map without entries");
             };
             if !is_spark_map_key_type(kv[0].data_type()) {
                 return plan_err!(
-                    "to_json: field {path} has map key type {}, which is not supported",
+                    "to_json: {path} has map key type {}, which is not supported",
                     kv[0].data_type()
                 );
             }
@@ -183,7 +200,7 @@ fn check_spark_json_type(data_type: &DataType, path: &str) -> Result<()> {
         // '1' DAY vs INTERVAL '1 00:00:00' DAY TO SECOND), which Arrow does not
         // record; durations, times, Float16 and unions have no Spark type
         other => plan_err!(
-            "to_json: field {path} has type {other}, which has no Spark JSON representation"
+            "to_json: {path} has type {other}, which has no Spark JSON representation"
         ),
     }
 }
@@ -1157,14 +1174,84 @@ mod tests {
     }
 
     #[test]
-    fn test_return_type_rejects_non_struct() {
+    fn test_return_type_rejects_unsupported_input() {
         let err = SparkToJson::new()
             .return_type(&[DataType::Utf8])
-            .unwrap_err();
-        assert!(err.to_string().contains("expects a struct argument"));
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("expects a struct, map or array argument"),
+            "{err}"
+        );
 
         let err = SparkToJson::new().return_type(&[]).unwrap_err();
         assert!(err.to_string().contains("exactly one argument"));
+    }
+
+    #[test]
+    fn test_return_type_accepts_map_and_array_input() {
+        let func = SparkToJson::new();
+        let item = |t: DataType| Arc::new(Field::new("item", t, true));
+        let entries = Fields::from(vec![
+            Field::new("keys", DataType::Utf8, false),
+            Field::new("values", DataType::Int32, true),
+        ]);
+        let entries = Arc::new(Field::new("entries", DataType::Struct(entries), false));
+        let point = Fields::from(vec![Field::new("x", DataType::Int32, true)]);
+
+        for t in [
+            DataType::Map(entries, false),
+            DataType::List(item(DataType::Int32)),
+            DataType::LargeList(item(DataType::Utf8)),
+            DataType::FixedSizeList(item(DataType::Float64), 2),
+            DataType::ListView(item(DataType::Date32)),
+            DataType::LargeListView(item(DataType::Boolean)),
+            DataType::List(item(DataType::Struct(point))),
+        ] {
+            assert_eq!(func.return_type(&[t]).unwrap(), DataType::Utf8);
+        }
+    }
+
+    #[test]
+    fn test_return_type_checks_map_and_array_input() {
+        let return_type = |t: DataType| {
+            SparkToJson::new()
+                .return_type(&[t])
+                .unwrap_err()
+                .to_string()
+        };
+        let item = |t: DataType| Arc::new(Field::new("item", t, true));
+        let map_of = |k: DataType, v: DataType| {
+            let entries = Fields::from(vec![
+                Field::new("keys", k, false),
+                Field::new("values", v, true),
+            ]);
+            DataType::Map(
+                Arc::new(Field::new("entries", DataType::Struct(entries), false)),
+                false,
+            )
+        };
+        let interval = DataType::Interval(IntervalUnit::DayTime);
+
+        // the input has no field name, so the path starts at `input`
+        let err = return_type(DataType::List(item(interval.clone())));
+        assert!(err.contains("to_json: input[] has type"), "{err}");
+
+        let inner = Fields::from(vec![Field::new("i", interval.clone(), true)]);
+        let err = return_type(DataType::List(item(DataType::Struct(inner))));
+        assert!(err.contains("to_json: input[].i has type"), "{err}");
+
+        let err = return_type(map_of(DataType::Utf8, interval));
+        assert!(err.contains("to_json: input[] has type"), "{err}");
+
+        // the key type of a map input is checked too
+        let list_key = DataType::List(item(DataType::Int32));
+        let err = return_type(map_of(list_key, DataType::Int32));
+        assert!(
+            err.contains("to_json: input has map key type List(")
+                && err.contains("not supported"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -2078,12 +2165,13 @@ mod dataframe_tests {
             batches_to_sort_string(&df_results)
         );
 
-        // check that a non-struct argument is rejected when the plan is built
+        // check that an argument that is not a struct, map or array is rejected
+        // when the plan is built
         let err = df
             .with_column("bad", to_json(col("foo")))
             .unwrap_err()
             .to_string();
-        assert_contains!(err, "to_json expects a struct argument");
+        assert_contains!(err, "to_json expects a struct, map or array argument");
 
         // check that the same result is produced through SQL: to_json is a
         // regular scalar UDF, so once registered it works on any struct
@@ -2105,13 +2193,13 @@ mod dataframe_tests {
             batches_to_sort_string(&df_results)
         );
 
-        // the SQL path rejects a non-struct argument at plan time as well
+        // the SQL path rejects such an argument at plan time as well
         let err = ctx
             .sql(&format!("SELECT to_json(foo) FROM {SAMPLE_TABLE_SQL}"))
             .await
             .unwrap_err()
             .to_string();
-        assert_contains!(err, "to_json expects a struct argument");
+        assert_contains!(err, "to_json expects a struct, map or array argument");
 
         Ok(())
     }
