@@ -27,6 +27,7 @@ function differs from the DataFusion built-in of the same name, if there is one.
 - [Other Functions](scalar/other.md) (6)
 - [JSON Functions](scalar/json.md) (3)
 - [URL Functions](scalar/url.md) (3)
+- [Variant Functions](scalar/variant.md) (1)
 
 ## Aggregate Functions
 
@@ -95,6 +96,7 @@ function differs from the DataFusion built-in of the same name, if there is one.
 - [if](scalar/conditional.md#if)
 - [ilike](scalar/string.md#ilike)
 - [is_valid_utf8](scalar/string.md#is_valid_utf8)
+- [is_variant_null](scalar/variant.md#is_variant_null)
 - [json_array_length](scalar/json.md#json_array_length)
 - [json_tuple](scalar/json.md#json_tuple)
 - [last_day](scalar/time_and_date.md#last_day)
