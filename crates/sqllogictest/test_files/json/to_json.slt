@@ -38,7 +38,7 @@ SELECT to_json(named_struct('b', true, 'i', 42::BIGINT, 's', 'text'::STRING));
 ----
 {"b":true,"i":42,"s":"text"}
 
-# array input
+# column input
 query T rowsort
 SELECT to_json(named_struct('id', id, 'name', name))
 FROM (VALUES (1::INT, 'a'::STRING), (2::INT, NULL::STRING), (NULL::INT, 'c'::STRING)) AS t(id, name);
@@ -351,6 +351,191 @@ SELECT to_json(named_struct('s', arrow_cast('a', 'Dictionary(Int32, Utf8)')));
 ----
 {"s":"a"}
 
+## Map and array input
+
+# Spark's to_json also takes a map or an array as the value to serialize. These
+# queries build their values with array() and map_from_arrays() rather than
+# `[...]` literals, which Spark does not parse, so that the PySpark runner
+# checks them.
+
+query T
+SELECT to_json(map('a', 1::INT));
+----
+{"a":1}
+
+query T
+SELECT to_json(map_from_arrays(array('a', 'b'), array(1::INT, 2::INT)));
+----
+{"a":1,"b":2}
+
+query T
+SELECT to_json(array(1::INT, 2::INT, 3::INT));
+----
+[1,2,3]
+
+query T
+SELECT to_json(array(named_struct('a', 1::INT, 'b', 2::INT)));
+----
+[{"a":1,"b":2}]
+
+query T
+SELECT to_json(array(map_from_arrays(array('a'), array(1::INT))));
+----
+[{"a":1}]
+
+query T
+SELECT to_json(map_from_arrays(array('a'), array(named_struct('b', 1::INT))));
+----
+{"a":{"b":1}}
+
+query T
+SELECT to_json(map_from_arrays(array('a'), array(array(1::INT, 2::INT))));
+----
+{"a":[1,2]}
+
+query T
+SELECT to_json(array(array(1::INT, 2::INT), array(3::INT)));
+----
+[[1,2],[3]]
+
+# empty values
+query T
+SELECT to_json(array());
+----
+[]
+
+query T
+SELECT to_json(cast(array() as array<int>));
+----
+[]
+
+query T
+SELECT to_json(map_from_arrays(cast(array() as array<string>), cast(array() as array<int>)));
+----
+{}
+
+# NULL elements and NULL map values are written as null
+query T
+SELECT to_json(array(1::INT, NULL, 3::INT));
+----
+[1,null,3]
+
+query T
+SELECT to_json(map_from_arrays(array('a', 'b'), array(1::INT, NULL)));
+----
+{"a":1,"b":null}
+
+# a NULL map or array produces NULL
+query T
+SELECT to_json(CASE WHEN false THEN map_from_arrays(array('a'), array(1::INT)) END);
+----
+NULL
+
+query T
+SELECT to_json(CASE WHEN false THEN array(1::INT) END);
+----
+NULL
+
+# NULL struct fields are omitted inside an array or a map as well
+query T
+SELECT to_json(array(named_struct('a', 1::INT, 'b', NULL::STRING), named_struct('a', NULL::INT, 'b', NULL::STRING)));
+----
+[{"a":1},{}]
+
+query T
+SELECT to_json(map_from_arrays(array('k'), array(named_struct('a', NULL::INT))));
+----
+{"k":{}}
+
+# a NULL struct element is written as null
+query T
+SELECT to_json(array(named_struct('a', 1::INT), CASE WHEN false THEN named_struct('a', 1::INT) END));
+----
+[{"a":1},null]
+
+# map keys are written as strings, with the text of Spark's internal value
+query T
+SELECT to_json(map_from_arrays(array(1::INT), array('v')));
+----
+{"1":"v"}
+
+query T
+SELECT to_json(map_from_arrays(array(true), array('v')));
+----
+{"true":"v"}
+
+query T
+SELECT to_json(map_from_arrays(array(DATE '2024-01-01'), array(1::INT)));
+----
+{"19723":1}
+
+query T
+SELECT to_json(map_from_arrays(array(TIMESTAMP '2024-01-01 01:02:03.123456'), array(1::INT)));
+----
+{"1704070923123456":1}
+
+query T
+SELECT to_json(map_from_arrays(array(1e10::DOUBLE), array(1::INT)));
+----
+{"1.0E10":1}
+
+query T
+SELECT to_json(map_from_arrays(array(0.0000001::DECIMAL(10, 8)), array(1::INT)));
+----
+{"1.0E-7":1}
+
+# elements and values are formatted as they are inside a struct
+query T
+SELECT to_json(array(1e-5::DOUBLE, 1.0::DOUBLE, 'NaN'::DOUBLE));
+----
+[1.0E-5,1.0,"NaN"]
+
+query T
+SELECT to_json(array(1.5::DECIMAL(10, 2), NULL));
+----
+[1.50,null]
+
+query T
+SELECT to_json(array(DATE '2024-01-01'));
+----
+["2024-01-01"]
+
+query T
+SELECT to_json(array('a"b'));
+----
+["a\"b"]
+
+query T
+SELECT to_json(map_from_arrays(array('b'), array(X'0001FF')));
+----
+{"b":"AAH/"}
+
+# the other Arrow list types are arrays too
+query T
+SELECT to_json(arrow_cast(array(1::INT, 2::INT), 'LargeList(Int32)'));
+----
+[1,2]
+
+query T
+SELECT to_json(arrow_cast(array(1::INT, 2::INT), 'FixedSizeList(2, Int32)'));
+----
+[1,2]
+
+# column input
+query T rowsort
+SELECT to_json(array(a, b))
+FROM (VALUES (1::INT, 2::INT), (3::INT, NULL::INT)) AS t(a, b);
+----
+[1,2]
+[3,null]
+
+query T rowsort
+SELECT to_json(map_from_arrays(array(k), array(v)))
+FROM (VALUES ('a'::STRING, 1::INT), ('b'::STRING, NULL::INT)) AS t(k, v);
+----
+{"a":1}
+{"b":null}
+
 ## Errors
 
 query error Error during planning: to_json expects a struct, map or array argument, got Utf8
@@ -372,3 +557,16 @@ SELECT to_json(named_struct('s', named_struct('l', [INTERVAL '1' DAY])));
 
 query error Error during planning: to_json: field m has map key type List\(.*\), which is not supported
 SELECT to_json(named_struct('m', map([[1::INT]], [1::INT])));
+
+# the same checks apply to the elements, keys and values of a map or array input
+# xfail spark: intended: Arrow intervals do not record Spark's start and end fields, so to_json rejects them
+query error Error during planning: to_json: input\[\] has type Interval\(MonthDayNano\), which has no Spark JSON representation
+SELECT to_json(array(INTERVAL '1' DAY));
+
+# xfail spark: intended: Spark writes an array key as the toString of its internal value, which to_json does not reproduce
+query error Error during planning: to_json: input has map key type List\(.*\), which is not supported
+SELECT to_json(map_from_arrays(array(array(1::INT)), array(1::INT)));
+
+# an untyped NULL is not a struct, map or array
+query error Error during planning: to_json expects a struct, map or array argument, got Null
+SELECT to_json(NULL);
