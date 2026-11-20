@@ -31,5 +31,6 @@ pub(crate) mod timezone_utils;
 pub(crate) mod type_coercion;
 pub mod url;
 pub mod utils;
+pub mod variant;
 pub mod window;
 pub mod xml;

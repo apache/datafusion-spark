@@ -219,6 +219,7 @@ pub mod expr_fn {
     pub use super::function::r#struct::expr_fn::*;
     pub use super::function::table::expr_fn::*;
     pub use super::function::url::expr_fn::*;
+    pub use super::function::variant::expr_fn::*;
     pub use super::function::window::expr_fn::*;
     pub use super::function::xml::expr_fn::*;
 }
@@ -245,6 +246,7 @@ pub fn all_default_scalar_functions() -> Vec<Arc<ScalarUDF>> {
         .chain(function::string::functions())
         .chain(function::r#struct::functions())
         .chain(function::url::functions())
+        .chain(function::variant::functions())
         .chain(function::xml::functions())
         .collect::<Vec<_>>()
 }
