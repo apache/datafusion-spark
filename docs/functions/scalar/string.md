@@ -22,6 +22,7 @@ Part of the [datafusion-spark function reference](../README.md).
 - [concat_ws](#concat_ws)
 - [contains](#contains)
 - [elt](#elt)
+- [find_in_set](#find_in_set)
 - [format_string](#format_string)
 - [ilike](#ilike)
 - [is_valid_utf8](#is_valid_utf8)
@@ -186,6 +187,28 @@ scala
 1
 > SELECT elt(3, 'scala', 'java');
 NULL
+```
+
+## `find_in_set`
+
+Returns the 1-based index of the first matching element as an INT. Uses the UTF8_BINARY collation: the search is case-sensitive and elements are split on commas without trimming. Empty elements count, including the single empty element in an empty list. Returns 0 when the string contains a comma or has no match and NULL if either argument is NULL.
+
+```sql
+find_in_set(str, strlist)
+```
+
+### Arguments
+
+- **str**: String expression to match.
+- **strlist**: Comma-separated list of strings.
+
+### Example
+
+```sql
+> SELECT find_in_set('b', 'a,b,c');
+2
+> SELECT find_in_set('', 'a,,b');
+2
 ```
 
 ## `format_string`

@@ -220,3 +220,80 @@ SELECT find_in_set(arrow_cast(a, 'LargeUtf8'), arrow_cast('abc,b,ab,c,def', 'Lar
 3
 0
 NULL
+
+# Spark implicitly casts both arguments to strings.
+query II
+SELECT find_in_set(2::INT, '1,2,3'), find_in_set('2', 2::INT);
+----
+2 1
+
+query I
+SELECT find_in_set(a, 'false,true')
+FROM (VALUES (true), (false), (NULL::BOOLEAN)) AS t(a);
+----
+2
+1
+NULL
+
+query I
+SELECT find_in_set(X'62', 'a,b');
+----
+2
+
+query I
+SELECT find_in_set(DATE '2020-01-01', 'x,2020-01-01');
+----
+2
+
+# xfail spark: timestamp-to-string casting differs (https://github.com/apache/datafusion-spark/issues/88).
+query I
+SELECT find_in_set(TIMESTAMP '2020-01-01 00:00:00', 'x,2020-01-01 00:00:00');
+----
+0
+
+# xfail spark: double-to-string casting differs (https://github.com/apache/datafusion-spark/issues/88).
+query I
+SELECT find_in_set(1e20::DOUBLE, '1.0E20,100000000000000000000');
+----
+0
+
+# xfail spark: binary-to-string casting differs (https://github.com/apache/datafusion-spark/issues/88).
+statement error Encountered non UTF-8 data
+SELECT find_in_set(X'FF', 'a,b');
+
+query III
+SELECT find_in_set(NULL, 'a'), find_in_set('a', NULL), find_in_set(NULL, NULL);
+----
+NULL NULL NULL
+
+query I
+SELECT find_in_set(arrow_cast(a, 'LargeUtf8'), arrow_cast(b, 'Utf8View'))
+FROM (VALUES ('b', 'a,b'), ('界', 'a,界'), (NULL::STRING, 'a,b')) AS t(a, b);
+----
+2
+2
+NULL
+
+query I
+SELECT find_in_set(arrow_cast(a, 'Dictionary(Int8, Utf8)'), b)
+FROM (VALUES ('b', 'a,b'), ('a', 'a,a'), (NULL::STRING, 'a,b')) AS t(a, b);
+----
+2
+1
+NULL
+
+query T
+SELECT arrow_typeof(find_in_set(arrow_cast('b', 'LargeUtf8'), 'a,b'));
+----
+Int32
+
+query T rowsort
+SELECT arrow_typeof(find_in_set(arrow_cast(a, 'LargeUtf8'), b))
+FROM (VALUES ('b', 'a,b'), (NULL::STRING, 'a,b')) AS t(a, b);
+----
+Int32
+Int32
+
+# xfail spark: collations are not supported yet (https://github.com/apache/datafusion-spark/issues/299).
+statement error Unsupported ast node in sqltorel: Collate
+SELECT find_in_set('B' COLLATE UTF8_LCASE, 'a,b');
