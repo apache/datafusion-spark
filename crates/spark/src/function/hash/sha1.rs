@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, StringArray, StringBuilder};
-use arrow::datatypes::{DataType, Field, FieldRef};
+use arrow::datatypes::{DataType, FieldRef};
 use datafusion_common::cast::{
     as_binary_array, as_binary_view_array, as_fixed_size_binary_array,
     as_large_binary_array,
@@ -23,6 +23,11 @@ use datafusion_macros::user_doc;
 use sha1::{Digest, Sha1};
 
 use crate::function::implicit_cast::{SparkInputType, SparkInputTypes};
+
+use crate::function::nullability::{SparkNullability, spark_nullability};
+
+/// Spark's `Sha1` is a null-intolerant `UnaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `sha1` expression.
 ///
@@ -99,9 +104,10 @@ impl ScalarUDFImpl for SparkSha1 {
     }
 
     fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
-        let nullable = args.arg_fields.iter().any(|f| f.is_nullable());
-        Ok(Arc::new(Field::new(self.name(), DataType::Utf8, nullable)))
+        Ok(NULLABILITY.return_field(self.name(), DataType::Utf8, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()
@@ -163,6 +169,7 @@ fn spark_sha1(args: &[ArrayRef]) -> Result<ArrayRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::datatypes::Field;
 
     #[test]
     fn test_sha1_nullability() -> Result<()> {

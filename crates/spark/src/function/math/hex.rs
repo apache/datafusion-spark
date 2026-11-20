@@ -5,6 +5,7 @@
 use std::str::from_utf8_unchecked;
 use std::sync::Arc;
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{Array, ArrayAccessor, ArrayRef, StringArray, StringBuilder};
 use arrow::buffer::{Buffer, OffsetBuffer};
 use arrow::datatypes::DataType;
@@ -27,6 +28,9 @@ use datafusion_expr::{
     ScalarUDFImpl, Signature, TypeSignature, TypeSignatureClass, Volatility,
 };
 use datafusion_macros::user_doc;
+
+/// Spark's `Hex` is a null-intolerant `UnaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `hex` expression.
 ///
@@ -109,6 +113,8 @@ impl ScalarUDFImpl for SparkHex {
             _ => DataType::Utf8,
         })
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn invoke_with_args(
         &self,

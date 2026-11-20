@@ -2,17 +2,19 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::*;
 use arrow::compute::kernels::bitwise;
-use arrow::datatypes::{
-    DataType, Field, FieldRef, Int8Type, Int16Type, Int32Type, Int64Type,
-};
+use arrow::datatypes::{DataType, FieldRef, Int8Type, Int16Type, Int32Type, Int64Type};
 use datafusion_common::{Result, internal_err, plan_err};
 use datafusion_expr::{ColumnarValue, Documentation, TypeSignature, Volatility};
 use datafusion_expr::{ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl, Signature};
 use datafusion_functions::utils::make_scalar_function;
 use datafusion_macros::user_doc;
 use std::sync::Arc;
+
+/// Spark's `BitwiseNot` is a null-intolerant `UnaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `bitwise_not` expression (the `~` operator in Spark SQL).
 ///
@@ -79,12 +81,11 @@ impl ScalarUDFImpl for SparkBitwiseNot {
     }
 
     fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
-        Ok(Arc::new(Field::new(
-            self.name(),
-            args.arg_fields[0].data_type().clone(),
-            args.arg_fields[0].is_nullable(),
-        )))
+        let data_type = args.arg_fields[0].data_type().clone();
+        Ok(NULLABILITY.return_field(self.name(), data_type, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()
@@ -133,6 +134,7 @@ pub fn spark_bitwise_not(args: &[ArrayRef]) -> Result<ArrayRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::datatypes::Field;
     use std::sync::Arc;
 
     #[test]

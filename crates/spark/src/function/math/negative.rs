@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::types::*;
 use arrow::array::*;
 use arrow::datatypes::{DataType, IntervalDayTime, IntervalMonthDayNano, IntervalUnit};
@@ -14,6 +15,9 @@ use datafusion_expr::{
 };
 use datafusion_macros::user_doc;
 use std::sync::Arc;
+
+/// Spark's `UnaryMinus` is a null-intolerant `UnaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `negative` expression.
 ///
@@ -86,6 +90,8 @@ impl ScalarUDFImpl for SparkNegative {
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         Ok(arg_types[0].clone())
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()

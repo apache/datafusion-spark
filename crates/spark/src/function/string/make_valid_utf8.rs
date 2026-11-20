@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{ArrayRef, LargeStringArray, StringArray};
-use arrow::datatypes::{DataType, Field, FieldRef};
+use arrow::datatypes::{DataType, FieldRef};
 use datafusion_common::cast::{
     as_binary_array, as_binary_view_array, as_large_binary_array,
 };
@@ -16,6 +17,9 @@ use datafusion_expr::{
 use datafusion_functions::utils::make_scalar_function;
 use datafusion_macros::user_doc;
 use std::sync::Arc;
+
+/// Spark's `MakeValidUTF8` is null-intolerant and always nullable.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant_always_nullable();
 
 /// Spark-compatible `make_valid_utf8` expression.
 ///
@@ -93,12 +97,10 @@ impl ScalarUDFImpl for SparkMakeValidUtf8 {
             DataType::LargeBinary => Ok(DataType::LargeUtf8),
             data_type => internal_err!("make_valid_utf8 does not support: {data_type}"),
         }?;
-        Ok(Arc::new(Field::new(
-            self.name(),
-            return_type,
-            make_valid_utf8.is_nullable(),
-        )))
+        Ok(NULLABILITY.return_field(self.name(), return_type, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()

@@ -3,6 +3,7 @@
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
 use crate::function::error_utils::unsupported_data_type_exec_err;
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{ArrayRef, AsArray};
 use arrow::datatypes::{DataType, Float64Type};
 use datafusion_common::utils::take_function_args;
@@ -13,6 +14,9 @@ use datafusion_expr::{
 };
 use datafusion_macros::user_doc;
 use std::sync::Arc;
+
+/// Spark's `Expm1` is a null-intolerant `UnaryMathExpression`, which is always nullable.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant_always_nullable();
 
 /// Spark-compatible `expm1` expression.
 ///
@@ -65,6 +69,8 @@ impl ScalarUDFImpl for SparkExpm1 {
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
         Ok(DataType::Float64)
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()

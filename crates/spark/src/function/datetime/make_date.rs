@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use arrow::array::{Array, Date32Array, Date32Builder, new_empty_array};
-use arrow::datatypes::{DataType, Field, FieldRef};
+use arrow::datatypes::{DataType, FieldRef};
 use datafusion_common::cast::as_int32_array;
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, ScalarValue, exec_err, internal_err};
@@ -16,8 +16,15 @@ use datafusion_expr::{
 use datafusion_macros::user_doc;
 
 use super::date_part_name::int32_coercion;
+use crate::function::nullability::{SparkNullability, spark_nullability};
 
 const ARITHMETIC_OVERFLOW_ERROR: &str = r#"[ARITHMETIC_OVERFLOW] overflow. If necessary set "spark.sql.ansi.enabled" to "false" to bypass this error. SQLSTATE: 22003"#;
+
+/// Spark's `MakeDate` is null-intolerant. It is always nullable when ANSI mode is off,
+/// because an invalid date returns NULL, and nullable when an argument is when ANSI mode is
+/// on. ANSI mode is not known in `return_field_from_args`, so the result is always nullable
+/// here.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant_always_nullable();
 
 /// Spark-compatible `make_date` expression.
 ///
@@ -97,11 +104,11 @@ impl ScalarUDFImpl for SparkMakeDate {
         internal_err!("return_field_from_args should be used instead")
     }
 
-    fn return_field_from_args(&self, _args: ReturnFieldArgs) -> Result<FieldRef> {
-        // An invalid date returns NULL when ANSI mode is off, which is not known
-        // at planning time, so the result is always nullable.
-        Ok(Arc::new(Field::new(self.name(), DataType::Date32, true)))
+    fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
+        Ok(NULLABILITY.return_field(self.name(), DataType::Date32, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()
@@ -279,6 +286,7 @@ fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
 mod tests {
     use super::*;
     use arrow::array::Int32Array;
+    use arrow::datatypes::Field;
     use datafusion_common::config::ConfigOptions;
 
     fn invoke(

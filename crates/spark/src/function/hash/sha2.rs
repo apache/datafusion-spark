@@ -20,6 +20,11 @@ use sha2::{self, Digest};
 use std::sync::Arc;
 
 use crate::function::implicit_cast::{SparkInputType, SparkInputTypes};
+use crate::function::nullability::{SparkNullability, spark_nullability};
+
+/// Spark's `Sha2` is null-intolerant and always nullable, because an unsupported bit length
+/// returns NULL.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant_always_nullable();
 
 /// Spark-compatible `sha2` expression.
 ///
@@ -89,6 +94,8 @@ impl ScalarUDFImpl for SparkSha2 {
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
         Ok(DataType::Utf8)
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()

@@ -4,11 +4,12 @@
 
 use std::sync::Arc;
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::timezone::Tz;
 use arrow::array::{Array, ArrayRef, AsArray, PrimitiveBuilder, StringArrayType};
 use arrow::datatypes::TimeUnit;
 use arrow::datatypes::{
-    ArrowTimestampType, DataType, Field, FieldRef, TimestampMicrosecondType,
+    ArrowTimestampType, DataType, FieldRef, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
 };
 use chrono::{DateTime, Offset, TimeZone};
@@ -23,6 +24,9 @@ use datafusion_expr::{
 };
 use datafusion_functions::utils::make_scalar_function;
 use datafusion_macros::user_doc;
+
+/// Spark's `ToUTCTimestamp` is a null-intolerant `BinaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `to_utc_timestamp` expression.
 ///
@@ -102,14 +106,11 @@ impl ScalarUDFImpl for SparkToUtcTimestamp {
     }
 
     fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
-        let nullable = args.arg_fields.iter().any(|f| f.is_nullable());
-
-        Ok(Arc::new(Field::new(
-            self.name(),
-            args.arg_fields[0].data_type().clone(),
-            nullable,
-        )))
+        let data_type = args.arg_fields[0].data_type().clone();
+        Ok(NULLABILITY.return_field(self.name(), data_type, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         make_scalar_function(to_utc_timestamp, vec![])(&args.args)

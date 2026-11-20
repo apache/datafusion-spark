@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{Array, ArrayRef, BinaryBuilder};
 use arrow::datatypes::DataType;
 use datafusion_common::cast::{
@@ -18,6 +19,10 @@ use datafusion_expr::{
 };
 use datafusion_macros::user_doc;
 use std::sync::Arc;
+
+/// Spark's `Unhex` is null-intolerant and always nullable, because an invalid hex string
+/// returns NULL.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant_always_nullable();
 
 /// Spark-compatible `unhex` expression.
 ///
@@ -76,6 +81,8 @@ impl ScalarUDFImpl for SparkUnhex {
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
         Ok(DataType::Binary)
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()

@@ -3,17 +3,24 @@
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
 use crate::function::float_normalize::normalize_floats;
+use crate::function::functions_nested_utils::list_element_field;
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{
     Array, AsArray, BooleanArray, BooleanBufferBuilder, GenericListArray, OffsetSizeTrait,
 };
 use arrow::buffer::{BooleanBuffer, NullBuffer};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::{Result, exec_err};
+use datafusion_expr::ReturnFieldArgs;
 use datafusion_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
 };
 use datafusion_functions_nested::array_has::array_has_udf;
 use std::sync::Arc;
+
+/// Spark's `ArrayContains` is a null-intolerant `BinaryExpression`. It is also nullable
+/// when the array can hold NULL elements.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `array_contains` function.
 ///
@@ -58,6 +65,19 @@ impl ScalarUDFImpl for SparkArrayContains {
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
         Ok(DataType::Boolean)
     }
+
+    fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
+        let contains_null = list_element_field(args.arg_fields[0].data_type())
+            .is_none_or(|field| field.is_nullable());
+        let nullable = NULLABILITY.nullable(args.arg_fields) || contains_null;
+        Ok(Arc::new(Field::new(
+            self.name(),
+            DataType::Boolean,
+            nullable,
+        )))
+    }
+
+    spark_nullability!(NULLABILITY);
 
     fn invoke_with_args(&self, mut args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         for arg in &mut args.args {
@@ -161,8 +181,29 @@ fn mask_with_list_nulls(
 mod tests {
     use super::*;
     use arrow::array::{FixedSizeListArray, Float64Array};
-    use arrow::datatypes::Field;
     use datafusion_common::ScalarValue;
+
+    fn return_field_nullable(array_nullable: bool, element_nullable: bool) -> bool {
+        let element = Arc::new(Field::new("item", DataType::Int64, element_nullable));
+        let arg_fields = [
+            Arc::new(Field::new("a", DataType::List(element), array_nullable)),
+            Arc::new(Field::new("v", DataType::Int64, false)),
+        ];
+        SparkArrayContains::new()
+            .return_field_from_args(ReturnFieldArgs {
+                arg_fields: &arg_fields,
+                scalar_arguments: &[None, None],
+            })
+            .unwrap()
+            .is_nullable()
+    }
+
+    #[test]
+    fn return_field_is_nullable_when_the_array_can_hold_nulls() {
+        assert!(!return_field_nullable(false, false));
+        assert!(return_field_nullable(true, false));
+        assert!(return_field_nullable(false, true));
+    }
 
     #[test]
     fn zero_width_fixed_size_list_keeps_its_row() {

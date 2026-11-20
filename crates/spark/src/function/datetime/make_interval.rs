@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{Array, ArrayRef, IntervalMonthDayNanoBuilder, PrimitiveArray};
 use arrow::datatypes::DataType::Interval;
 use arrow::datatypes::IntervalUnit::MonthDayNano;
@@ -16,6 +17,12 @@ use datafusion_expr::{
 };
 use datafusion_functions::utils::make_scalar_function;
 use datafusion_macros::user_doc;
+
+/// Spark's `MakeInterval` is null-intolerant. It is always nullable when ANSI mode is off,
+/// because an overflow returns NULL, and nullable when an argument is when ANSI mode is on.
+/// ANSI mode is not known in `return_field_from_args`, so the result is always nullable
+/// here.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant_always_nullable();
 
 /// Spark-compatible `make_interval` expression.
 ///
@@ -155,6 +162,8 @@ impl ScalarUDFImpl for SparkMakeInterval {
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
         Ok(Interval(MonthDayNano))
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         if args.args.is_empty() {

@@ -4,10 +4,11 @@
 
 use std::sync::Arc;
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{
     Array, ArrayRef, AsArray, Date32Array, Date32Builder, StringArrayType,
 };
-use arrow::datatypes::{DataType, Date32Type, Field, FieldRef};
+use arrow::datatypes::{DataType, Date32Type, FieldRef};
 use chrono::{Datelike, Weekday};
 use datafusion_common::types::{NativeType, logical_date, logical_string};
 use datafusion_common::{Result, ScalarValue, exec_err, internal_err};
@@ -16,6 +17,10 @@ use datafusion_expr::{
     ScalarUDFImpl, Signature, TypeSignatureClass, Volatility,
 };
 use datafusion_macros::user_doc;
+
+/// Spark's `NextDay` is null-intolerant and always nullable, because an unknown day of the
+/// week returns NULL when ANSI mode is off.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant_always_nullable();
 
 /// Spark-compatible `next_day` expression.
 ///
@@ -100,11 +105,11 @@ impl ScalarUDFImpl for SparkNextDay {
         internal_err!("return_field_from_args should be used instead")
     }
 
-    fn return_field_from_args(&self, _args: ReturnFieldArgs) -> Result<FieldRef> {
-        // Spark marks next_day as always nullable because invalid day_of_week values
-        // can yield NULL even when inputs are non-null.
-        Ok(Arc::new(Field::new(self.name(), DataType::Date32, true)))
+    fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
+        Ok(NULLABILITY.return_field(self.name(), DataType::Date32, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()
@@ -373,6 +378,7 @@ fn spark_next_day(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::datatypes::Field;
     use datafusion_common::config::ConfigOptions;
 
     #[test]

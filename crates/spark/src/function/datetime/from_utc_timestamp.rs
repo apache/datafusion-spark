@@ -7,6 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use super::timezone::TimeZoneRules;
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{
     Array, ArrayRef, AsArray, BooleanArray, PrimitiveBuilder, StringArrayType,
     new_empty_array,
@@ -27,6 +28,9 @@ use datafusion_expr::{
 use datafusion_functions::utils::make_scalar_function;
 use datafusion_macros::user_doc;
 use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
+
+/// Spark's `FromUTCTimestamp` is a null-intolerant `BinaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `from_utc_timestamp` expression.
 ///
@@ -113,14 +117,11 @@ impl ScalarUDFImpl for SparkFromUtcTimestamp {
     }
 
     fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
-        let nullable = args.arg_fields.iter().any(|f| f.is_nullable());
-
-        Ok(Arc::new(Field::new(
-            self.name(),
-            args.arg_fields[0].data_type().clone(),
-            nullable,
-        )))
+        let data_type = args.arg_fields[0].data_type().clone();
+        Ok(NULLABILITY.return_field(self.name(), data_type, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         make_scalar_function(spark_from_utc_timestamp, vec![])(&args.args)

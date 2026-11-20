@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{Array, Int64Array};
 use arrow::datatypes::DataType;
 use arrow::datatypes::DataType::{Int32, Int64};
@@ -18,6 +19,10 @@ use datafusion_expr::{
     TypeSignatureClass, Volatility,
 };
 use datafusion_macros::user_doc;
+
+/// Spark's `Factorial` is null-intolerant and always nullable, because a value outside 0 to
+/// 20 returns NULL.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant_always_nullable();
 
 /// Spark-compatible `factorial` expression.
 ///
@@ -80,6 +85,8 @@ impl ScalarUDFImpl for SparkFactorial {
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
         Ok(Int64)
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         spark_factorial(&args.args)

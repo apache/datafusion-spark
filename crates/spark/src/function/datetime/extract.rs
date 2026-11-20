@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::ArrayRef;
 use arrow::compute::{DatePart, date_part};
 use arrow::datatypes::DataType;
@@ -25,6 +26,9 @@ fn extract_signature() -> Signature {
 // -----------------------------------------------------------------------------
 // SparkHour
 // -----------------------------------------------------------------------------
+
+/// Spark's `Hour`, `Minute` and `Second` are null-intolerant `UnaryExpression`s.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `hour` expression.
 ///
@@ -77,6 +81,8 @@ impl ScalarUDFImpl for SparkHour {
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
         Ok(DataType::Int32)
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()
@@ -149,6 +155,8 @@ impl ScalarUDFImpl for SparkMinute {
         Ok(DataType::Int32)
     }
 
+    spark_nullability!(NULLABILITY, return_type);
+
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()
     }
@@ -220,6 +228,8 @@ impl ScalarUDFImpl for SparkSecond {
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
         Ok(DataType::Int32)
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()

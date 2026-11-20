@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{Array, ArrayRef, AsArray};
 use arrow::compute::cast;
 use arrow::datatypes::DataType::{
@@ -18,6 +19,9 @@ use datafusion_expr::{
 };
 use datafusion_functions::utils::make_scalar_function;
 use datafusion_macros::user_doc;
+
+/// Spark's `Rint` is a null-intolerant `UnaryMathExpression`, which is always nullable.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant_always_nullable();
 
 /// Spark-compatible `rint` expression.
 ///
@@ -70,6 +74,8 @@ impl ScalarUDFImpl for SparkRint {
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
         Ok(Float64)
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()

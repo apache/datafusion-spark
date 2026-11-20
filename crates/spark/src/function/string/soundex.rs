@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{ArrayRef, GenericStringBuilder, OffsetSizeTrait};
 use arrow::datatypes::DataType;
 use datafusion_common::cast::{as_generic_string_array, as_string_view_array};
@@ -12,6 +13,9 @@ use datafusion_expr::{ScalarFunctionArgs, ScalarUDFImpl};
 use datafusion_functions::utils::make_scalar_function;
 use datafusion_macros::user_doc;
 use std::sync::Arc;
+
+/// Spark's `SoundEx` is a null-intolerant `UnaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `soundex` expression.
 ///
@@ -71,6 +75,8 @@ impl ScalarUDFImpl for SparkSoundex {
             _ => Ok(DataType::Utf8),
         }
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         make_scalar_function(spark_soundex_inner, vec![])(&args.args)

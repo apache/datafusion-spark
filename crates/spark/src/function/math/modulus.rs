@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{ArrayRef, BooleanArray, Scalar, new_null_array};
 use arrow::compute::kernels::cast::{CastOptions, cast, cast_with_options};
 use arrow::compute::kernels::numeric::add_wrapping;
@@ -192,6 +193,10 @@ pub fn spark_pmod(
     Ok(ColumnarValue::Array(result))
 }
 
+/// Spark's `Remainder` and `Pmod` are null-intolerant and always nullable, because a zero
+/// divisor returns NULL when ANSI mode is off.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant_always_nullable();
+
 /// SparkMod implements the Spark-compatible modulo function
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SparkMod {
@@ -232,6 +237,8 @@ impl ScalarUDFImpl for SparkMod {
         // Arrow's rem function handles type promotion internally
         Ok(arg_types[0].clone())
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         spark_mod(&args.args, args.config_options.execution.enable_ansi_mode)
@@ -297,6 +304,8 @@ impl ScalarUDFImpl for SparkPmod {
             _ => Ok(arg_types[0].clone()),
         }
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         spark_pmod(
