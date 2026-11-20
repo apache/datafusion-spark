@@ -95,14 +95,71 @@ class ParseTest(unittest.TestCase):
             "query I\n"
             "SELECT 4\n"
         )
-        reasons = [record.xfail_reason for record in records]
-        self.assertEqual(reasons, ["Spark returns NULL", None, "no space after the hash", None])
+        reasons = [[x.reason for x in record.xfails] for record in records]
+        self.assertEqual(reasons, [["Spark returns NULL"], [], ["no space after the hash"], []])
+
+    def test_xfail_spark_versions(self):
+        [record] = parse(
+            "# xfail spark<4.0: Spark 3.5 differs\n"
+            "# xfail spark >= 4.0, <=4.2: Spark 4.0 to 4.2 differ\n"
+            "query I\n"
+            "SELECT 1\n"
+        )
+        reason = lambda version: getattr(record.xfail(r.version_tuple(version)), "reason", None)  # noqa: E731
+        self.assertEqual(reason("3.5.9"), "Spark 3.5 differs")
+        self.assertEqual(reason("4.0.1"), "Spark 4.0 to 4.2 differ")
+        self.assertEqual(reason("4.2.0"), "Spark 4.0 to 4.2 differ")
+        self.assertIsNone(reason("4.3.0"))
+
+    def test_xfail_that_never_applies(self):
+        # No supported version matches the first, and the second is shadowed.
+        for markers in ("# xfail spark>=4.0, <4.2: x\n", "# xfail spark: x\n# xfail spark<4.0: y\n"):
+            with self.assertRaisesRegex(SystemExit, "never applies"):
+                parse(f"{markers}query I\nSELECT 1\n")
+
+    def test_first_matching_xfail_applies(self):
+        [record] = parse("# xfail spark<4.0: old\n# xfail spark: any\nquery I\nSELECT 1\n")
+        self.assertEqual(record.xfail((3, 5)).reason, "old")
+        self.assertEqual(record.xfail((4, 2)).reason, "any")
+
+    def test_xfail_bad_version_condition(self):
+        for marker in ("# xfail spark 3.5: x", "# xfail spark<4: x", "# xfail spark<4.0;>3.4: x"):
+            with self.assertRaisesRegex(SystemExit, "version condition"):
+                parse(f"{marker}\nquery I\nSELECT 1\n")
 
 
 class TranslateTest(unittest.TestCase):
     def test_spark_parses_double_colon_casts(self):
         sql = "SELECT abs(-128::TINYINT), 'a'::STRING"
         self.assertEqual(r.translate(sql), sql)
+
+    def test_double_colon_casts_for_spark_3(self):
+        cases = {
+            "SELECT 1::int": "SELECT CAST(1 AS int)",
+            # A sign belongs to a number literal, as in Spark 4.
+            "SELECT -128::tinyint, 1 -2::int": "SELECT CAST(-128 AS tinyint), 1 -CAST(2 AS int)",
+            "SELECT -(1)::double": "SELECT -CAST((1) AS double)",
+            "SELECT f(a, b)::string FROM t": "SELECT CAST(f(a, b) AS string) FROM t",
+            "SELECT t.a::bigint": "SELECT CAST(t.a AS bigint)",
+            "SELECT x::int::string": "SELECT CAST(CAST(x AS int) AS string)",
+            "SELECT DATE '2020-01-01'::string": "SELECT CAST(DATE '2020-01-01' AS string)",
+            "SELECT 1.5::decimal(10, 2) + 2": "SELECT CAST(1.5 AS decimal(10, 2)) + 2",
+            "SELECT a[1]::int, (1+2)::int": "SELECT CAST(a[1] AS int), CAST((1+2) AS int)",
+            "SELECT NULL::array<map<string, int>>": "SELECT CAST(NULL AS array<map<string, int>>)",
+            "SELECT (SELECT 1)::int": "SELECT CAST((SELECT 1) AS int)",
+            "SELECT 'a::b'::FLOAT8": "SELECT CAST('a::b' AS DOUBLE)",
+            # `exists` and `any` are functions here, not keywords.
+            "SELECT exists(arr, x -> x > 1)::string FROM t": "SELECT CAST(exists(arr, x -> x > 1) AS string) FROM t",
+            "SELECT any(a > 1)::string FROM t": "SELECT CAST(any(a > 1) AS string) FROM t",
+            # A field of a call or a subscript
+            "SELECT struct(1 AS x).x::string": "SELECT CAST(struct(1 AS x).x AS string)",
+            "SELECT map(1, struct(2 AS y))[1].y::string": "SELECT CAST(map(1, struct(2 AS y))[1].y AS string)",
+            # After a type other than ARRAY, MAP or STRUCT, `<` is a comparison.
+            "SELECT a::int < 5 AND b > 3 FROM t": "SELECT CAST(a AS int) < 5 AND b > 3 FROM t",
+            "SELECT a::int<b::int": "SELECT CAST(a AS int)<CAST(b AS int)",
+        }
+        for sql, expected in cases.items():
+            self.assertEqual(r.rewrite_double_colons(r.translate(sql)), expected, sql)
 
     def test_type_aliases(self):
         self.assertEqual(
@@ -435,6 +492,7 @@ class FakeRunner:
     """Stands in for SparkRunner: returns a fixed result or raises a SparkError."""
 
     time_zone = "UTC"
+    version = "4.2.0"
 
     def __init__(self, result=None, set_error=None):
         self.result = result
@@ -543,6 +601,32 @@ class RunRecordTest(unittest.TestCase):
         self.assertEqual(outcome.status, "xpass")
         self.assertIn("remove `# xfail spark: a fixed bug`", r.report(outcome, "4.2.0"))
 
+    def test_double_colon_rewritten_only_before_spark_4(self):
+        result = (FakeSchema("IntegerType"), [(1,)])
+        for version, expected in (("3.5.9", "SELECT CAST(1 AS int)"), ("4.2.0", "SELECT 1::int")):
+            runner = FakeRunner(result)
+            runner.version = version
+            [record] = parse("query I\nSELECT 1::int\n----\n1\n")
+            self.assertEqual(r.run_record(runner, record).status, "pass")
+            self.assertEqual(runner.sql, expected)
+        runner = FakeRunner(result)
+        runner.version = "3.5.9"
+        [record] = parse("statement ok\nCREATE TABLE t AS SELECT 1::int AS a\n")
+        r.run_record(runner, record)
+        self.assertEqual(runner.sql, "CREATE TEMPORARY VIEW t AS SELECT CAST(1 AS int) AS a")
+
+    def test_xfail_for_another_spark_version(self):
+        result = (FakeSchema("IntegerType"), [(1,)])
+        differs = "# xfail spark<4.0: only Spark 3.5\nquery I\nSELECT a\n----\n2\n"
+        self.assertEqual(self.outcome(differs, result).status, "mismatch")
+        passes = "# xfail spark<4.0: only Spark 3.5\nquery I\nSELECT a\n----\n1\n"
+        self.assertEqual(self.outcome(passes, result).status, "pass")
+
+    def test_xpass_names_the_versioned_marker(self):
+        result = (FakeSchema("IntegerType"), [(1,)])
+        outcome = self.outcome("# xfail spark>=4.0: fixed\nquery I\nSELECT a\n----\n1\n", result)
+        self.assertIn("remove `# xfail spark>=4.0: fixed`", r.report(outcome, "4.2.0"))
+
     def test_xfail_skipped_record_stays_skipped(self):
         parse_error = r.SparkError("parse", "Spark cannot parse it (PARSE_SYNTAX_ERROR)")
         outcome = self.outcome("# xfail spark: x\nquery ?\nSELECT [1]\n----\n[1]\n", parse_error)
@@ -617,7 +701,7 @@ class RunFilesTest(unittest.TestCase):
                 paths[-1].write_text("".join(self.QUERY.format(q) for q in queries))
             runner = DyingRunner()
             with contextlib.redirect_stdout(io.StringIO()) as out:
-                result = r.run_files(runner, paths)
+                result = r.run_files(runner, {p: r.parse_slt(p) for p in paths})
         return runner, result, out.getvalue()
 
     def test_new_session_after_the_jvm_dies(self):
@@ -649,7 +733,7 @@ class RunFilesTest(unittest.TestCase):
             path = Path(d, "0.slt")
             path.write_text(self.QUERY.format(1))
             with contextlib.redirect_stdout(io.StringIO()) as out:
-                statuses, _, stopped = r.run_files(runner, [path])
+                statuses, _, stopped = r.run_files(runner, {path: r.parse_slt(path)})
         self.assertIsNone(stopped)
         self.assertEqual((runner.restarts, statuses["pass"]), (1, 1))
         self.assertIn("Spark failed (An error occurred while calling o49.listTables.)", out.getvalue())
