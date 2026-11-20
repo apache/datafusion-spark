@@ -42,10 +42,11 @@ use datafusion_macros::user_doc;
 /// <https://spark.apache.org/docs/latest/api/sql/index.html#to_json>
 #[user_doc(
     doc_section(label = "JSON Functions"),
-    description = "Serializes a struct to a JSON string, one object per row, as Spark's `to_json` does with its \
-        default options. DataFusion has no built-in `to_json`. \
-        A NULL struct returns NULL. NULL struct fields are omitted (`ignoreNullFields`), while NULL map entries \
-        are kept as `\"key\":null`. Nested structs, lists and maps are serialized recursively. \
+    description = "Serializes a struct, map or array to a JSON string, one per row, as Spark's `to_json` does with \
+        its default options: a JSON object for a struct or a map, a JSON array for an array. \
+        A NULL input returns NULL. NULL struct fields are omitted (`ignoreNullFields`), while NULL map entries \
+        are kept as `\"key\":null` and NULL array elements are written as `null`. \
+        Nested structs, lists and maps are serialized recursively. \
         Floats are written like Java's `Double.toString` (`1.0`, `1.0E-5`; `NaN` and `Infinity` as strings), \
         decimals like `BigDecimal.toString` (`1.50`, `0E-10`), binary as Base64, dates as `yyyy-MM-dd`, \
         timestamps as `yyyy-MM-dd'T'HH:mm:ss.SSS` with the session time zone offset \
@@ -54,8 +55,8 @@ use datafusion_macros::user_doc;
         timestamps as microseconds, numbers as above. \
         Types with no Spark JSON representation (intervals, durations, times, unions, map keys other than \
         strings, booleans, numbers, dates and timestamps) are rejected when the query is planned. \
-        The options argument and map or array input are not supported.",
-    syntax_example = "to_json(struct_expr)",
+        The options argument is not supported.",
+    syntax_example = "to_json(expr)",
     sql_example = r#"```sql
 > SELECT to_json(named_struct('a', 1, 'b', 'x', 'c', CAST(NULL AS INT)));
 {"a":1,"b":"x"}
@@ -63,11 +64,15 @@ use datafusion_macros::user_doc;
 {"t":"2024-01-01T01:02:03.123","d":1.0E-5}
 > SELECT to_json(named_struct('m', map([DATE '2024-01-01'], [1])));
 {"m":{"19723":1}}
+> SELECT to_json(map('a', 1));
+{"a":1}
+> SELECT to_json(array(1, NULL, 3));
+[1,null,3]
 ```"#,
     argument(
-        name = "struct_expr",
-        description = "Struct expression to serialize, e.g. a struct column or a `named_struct` call. \
-            The field names become the JSON keys. NULL returns NULL."
+        name = "expr",
+        description = "Struct, map or array expression to serialize, e.g. a struct column, a `named_struct` \
+            call, a map or an array. Struct field names and map keys become the JSON keys. NULL returns NULL."
     )
 )]
 #[derive(Debug, PartialEq, Eq, Hash)]
