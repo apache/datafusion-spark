@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
+# SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
+
+# The pip requirements of the PySpark runner are not listed here on purpose:
+# `pyspark` is pinned to the Spark version that the sqllogictest files are
+# checked against, and changing it is a decision, not a routine update.
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 15
+    # `datafusion-spark` is a library, so leave a requirement in Cargo.toml as
+    # it is when it already allows the new version. Raising it would force the
+    # same minimum on downstream users. Cargo.lock is still updated.
+    versioning-strategy: increase-if-necessary
+    ignore:
+      # DataFusion and arrow are updated by hand. `main` follows a DataFusion
+      # release tag or branch and stays on the arrow version that DataFusion
+      # uses, so moving either is a decision, not a routine update. See
+      # dev/release/README.md#versioning.
+      - dependency-name: "datafusion*"
+      - dependency-name: "arrow*"
+    groups:
+      # Minor and patch updates of everything else go in one pull request.
+      all-other-cargo-deps:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      github-actions:
+        patterns:
+          - "*"
