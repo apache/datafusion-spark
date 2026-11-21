@@ -21,11 +21,13 @@
 //! that links the issue. Prefer it over `onlyif simplify`, because the PySpark runner
 //! skips every `onlyif` record that is not for `spark`.
 //!
-//! Usage: `cargo test -p datafusion-spark-sqllogictest -- [FILTER]... [--mode=MODE]`, where
-//! each `FILTER` is a substring of the test file path and `MODE` is `simplify` or
-//! `evaluate` (both by default). Pass `--complete` to rewrite the expected results in the
-//! matching files with the actual results instead of checking them. It runs only in
-//! `simplify` mode, so each file is rewritten once.
+//! Usage: `cargo test -p datafusion-spark-sqllogictest -- [FILTER]... [--mode=MODE]
+//! [--complete]`, where each `FILTER` is a substring of the test file path and `MODE` is
+//! `simplify` or `evaluate` (both by default).
+//!
+//! `--complete` rewrites the expected output of each matching file with the results of
+//! running it, in `simplify` mode unless `--mode` says otherwise. Review the diff before
+//! committing it, since it records whatever the functions return.
 
 mod engine;
 
@@ -174,12 +176,15 @@ fn new_context(mode: Mode) -> SessionContext {
     SessionContext::new_with_state(builder.build())
 }
 
+/// Runs the file at `path`, or with `complete`, rewrites its expected output with the
+/// results of this run.
 async fn run_file(path: PathBuf, mode: Mode, complete: bool) -> Result<(), String> {
     let mut runner = sqllogictest::Runner::new(|| async {
         Ok(SparkDataFusion::new(new_context(mode)))
     });
     runner.add_label(mode.label());
     if complete {
+        // Records skipped for this mode's label are written back unchanged.
         return runner
             .update_test_file(
                 &path,
@@ -205,6 +210,8 @@ async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let complete = args.iter().any(|arg| arg == "--complete");
     let modes: Vec<Mode> = match args.iter().find_map(|arg| arg.strip_prefix("--mode=")) {
+        // Completion writes one set of results, so it runs one mode. Both modes must
+        // produce the same results, which a normal run then checks.
         None if complete => vec![Mode::Simplify],
         None => Mode::ALL.to_vec(),
         Some(name) => match Mode::ALL.into_iter().find(|m| m.label() == name) {
@@ -248,6 +255,7 @@ async fn main() -> ExitCode {
         // A panic in one file (for example a function indexing past the end of an
         // array) is reported as that file failing, so the other results still print.
         match handle.await.map_err(|e| e.to_string()).and_then(|r| r) {
+            Ok(()) if complete => println!("COMPLETED {name}"),
             Ok(()) => println!("PASS {name}"),
             Err(e) => {
                 failed += 1;
