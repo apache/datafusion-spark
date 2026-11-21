@@ -32,6 +32,7 @@ Part of the [datafusion-spark function reference](../README.md).
 - [hex](#hex)
 - [hypot](#hypot)
 - [least](#least)
+- [log1p](#log1p)
 - [negative](#negative)
 - [positive](#positive)
 - [pow](#pow)
@@ -435,6 +436,27 @@ least(expr1, expr2[, ..., expr_n])
 2
 > SELECT least(1.0, 'NaN'::double);
 1.0
+```
+
+## `log1p`
+
+Returns `ln(1 + expr)` as a DOUBLE, computed accurately when `expr` is close to 0. Values less than or equal to -1 return NULL. NULL input returns NULL.
+
+```sql
+log1p(expr)
+```
+
+### Arguments
+
+- **expr**: Numeric expression evaluated as DOUBLE. Values <= -1 and NULL return NULL.
+
+### Example
+
+```sql
+> SELECT log1p(0);
+0
+> SELECT log1p(-1);
+NULL
 ```
 
 ## `negative`
