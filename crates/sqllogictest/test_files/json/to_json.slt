@@ -436,6 +436,17 @@ SELECT to_json(CASE WHEN false THEN array(1::INT) END);
 ----
 NULL
 
+# so does an untyped NULL
+query T
+SELECT to_json(NULL);
+----
+NULL
+
+query T
+SELECT to_json(NULL, map('ignoreNullFields', 'false'));
+----
+NULL
+
 # NULL struct fields are omitted inside an array or a map as well
 query T
 SELECT to_json(array(named_struct('a', 1::INT, 'b', NULL::STRING), named_struct('a', NULL::INT, 'b', NULL::STRING)));
@@ -637,7 +648,3 @@ SELECT to_json(array(INTERVAL '1' DAY));
 # xfail spark: intended: Spark writes an array key as the toString of its internal value, which to_json does not reproduce
 query error Error during planning: to_json: input has map key type List\(.*\), which is not supported
 SELECT to_json(map_from_arrays(array(array(1::INT)), array(1::INT)));
-
-# an untyped NULL is not a struct, map or array
-query error Error during planning: to_json expects a struct, map or array argument, got Null
-SELECT to_json(NULL);

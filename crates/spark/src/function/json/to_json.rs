@@ -308,11 +308,13 @@ fn check_options_type(data_type: &DataType) -> Result<()> {
 }
 
 /// Checks the type of the value passed to to_json. Spark accepts a struct, a
-/// map or an array; their fields, keys, values and elements are checked with
-/// `check_spark_json_type`.
+/// map or an array, whose fields, keys, values and elements are checked with
+/// `check_spark_json_type`, and an untyped NULL.
 fn check_input_type(data_type: &DataType) -> Result<()> {
     use DataType::*;
     match data_type {
+        // `to_json(NULL)`: Spark returns NULL
+        Null => Ok(()),
         // each field is reported under its own name
         Struct(fields) => fields.iter().try_for_each(|f| {
             check_spark_json_type(f.data_type(), &format!("field {}", f.name()))
@@ -384,6 +386,11 @@ fn to_json(
     config: &ConfigOptions,
     options: &ToJsonOptions,
 ) -> Result<ArrayRef> {
+    // an untyped NULL has nothing to serialize: Spark returns NULL
+    if matches!(array.data_type(), DataType::Null) {
+        return Ok(Arc::new(StringArray::new_null(array.len())));
+    }
+
     // Spark writes TIMESTAMP values in the session time zone
     let session_tz: Tz = config
         .execution
@@ -1855,6 +1862,33 @@ mod tests {
             assert_eq!(out.value(2), "[3,4]");
             assert_eq!(out.value(3), "[5,6]");
         }
+    }
+
+    #[test]
+    fn test_untyped_null_input() {
+        // Spark returns NULL for `to_json(NULL)`
+        let func = SparkToJson::new();
+        let return_type = func.return_type(&[DataType::Null]).unwrap();
+        assert_eq!(return_type, DataType::Utf8);
+
+        let field: FieldRef = Arc::new(Field::new("n", DataType::Null, true));
+        let scalar = ColumnarValue::Scalar(ScalarValue::Null);
+        let out = run(scalar, Arc::clone(&field)).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out.is_null(0));
+
+        // a column of the NULL type
+        let input = arrow::array::new_null_array(&DataType::Null, 3);
+        let out = run(ColumnarValue::Array(input), Arc::clone(&field)).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out.null_count(), 3);
+
+        // the options do not change it
+        let scalar = ColumnarValue::Scalar(ScalarValue::Null);
+        let options = [("ignoreNullFields", Some("false"))];
+        let out = run_with_options(scalar, field, &options).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out.is_null(0));
     }
 
     #[test]
