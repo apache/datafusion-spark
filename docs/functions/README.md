@@ -17,7 +17,7 @@ function differs from the DataFusion built-in of the same name, if there is one.
 
 ## Scalar Functions
 
-- [Math Functions](scalar/math.md) (27)
+- [Math Functions](scalar/math.md) (28)
 - [Conditional Functions](scalar/conditional.md) (2)
 - [String Functions](scalar/string.md) (17)
 - [Binary String Functions](scalar/binary_string.md) (5)
@@ -102,6 +102,7 @@ function differs from the DataFusion built-in of the same name, if there is one.
 - [len](scalar/string.md#len)
 - [length](scalar/string.md#length)
 - [like](scalar/string.md#like)
+- [log1p](scalar/math.md#log1p)
 - [luhn_check](scalar/string.md#luhn_check)
 - [make_date](scalar/time_and_date.md#make_date)
 - [make_dt_interval](scalar/time_and_date.md#make_dt_interval)
