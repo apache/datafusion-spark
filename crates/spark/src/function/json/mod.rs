@@ -31,7 +31,7 @@ pub mod expr_fn {
     ));
     export_functions!((
         to_json,
-        "Serializes a struct value to a JSON string, following Spark's `to_json`; NULL fields are omitted and a NULL struct produces NULL.",
+        "Serializes a struct, map or array value to a JSON string, following Spark's `to_json`; NULL struct fields are omitted and a NULL input produces NULL.",
         input
     ));
 }
