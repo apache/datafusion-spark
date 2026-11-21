@@ -536,6 +536,56 @@ FROM (VALUES ('a'::STRING, 1::INT), ('b'::STRING, NULL::INT)) AS t(k, v);
 {"a":1}
 {"b":null}
 
+## Options
+
+# ignoreNullFields: NULL struct fields are written as null rather than omitted
+query T
+SELECT to_json(named_struct('a', 1::INT, 'b', NULL::STRING), map('ignoreNullFields', 'false'));
+----
+{"a":1,"b":null}
+
+query T
+SELECT to_json(named_struct('a', 1::INT, 'b', NULL::STRING), map('ignoreNullFields', 'true'));
+----
+{"a":1}
+
+# option names and boolean values are case-insensitive
+query T
+SELECT to_json(named_struct('a', NULL::INT), map('IGNORENULLFIELDS', 'False'));
+----
+{"a":null}
+
+# it applies to nested structs and to structs inside an array
+query T
+SELECT to_json(named_struct('n', named_struct('a', NULL::INT), 's', NULL::STRING), map('ignoreNullFields', 'false'));
+----
+{"n":{"a":null},"s":null}
+
+query T
+SELECT to_json(array(named_struct('a', 1::INT, 'b', NULL::STRING)), map('ignoreNullFields', 'false'));
+----
+[{"a":1,"b":null}]
+
+# NULL map values are written as null with either setting
+query T
+SELECT to_json(map_from_arrays(array('a', 'b'), array(1::INT, NULL)), map('ignoreNullFields', 'true'));
+----
+{"a":1,"b":null}
+
+# a NULL input is NULL whatever the options
+query T
+SELECT to_json(CASE WHEN false THEN named_struct('a', 1::INT) END, map('ignoreNullFields', 'false'));
+----
+NULL
+
+# column input
+query T rowsort
+SELECT to_json(named_struct('id', id, 'name', name), map('ignoreNullFields', 'false'))
+FROM (VALUES (1::INT, 'a'::STRING), (2::INT, NULL::STRING)) AS t(id, name);
+----
+{"id":1,"name":"a"}
+{"id":2,"name":null}
+
 ## Errors
 
 query error Error during planning: to_json expects a struct, map or array argument, got Utf8
@@ -544,8 +594,29 @@ SELECT to_json('abc'::STRING);
 query error 'to_json' does not support zero arguments
 SELECT to_json();
 
-query error to_json.* but received 2
+# the options must be a map of strings
+query error Error during planning: to_json: the options argument must be a map of strings, got
 SELECT to_json(named_struct('a', 1::INT), named_struct('b', 2::INT));
+
+query error Error during planning: to_json: the options argument must be a map of strings, got
+SELECT to_json(named_struct('a', 1::INT), map('ignoreNullFields', false));
+
+# a boolean option is true or false
+query error to_json: the ignoreNullFields option must be true or false, got 'maybe'
+SELECT to_json(named_struct('a', 1::INT), map('ignoreNullFields', 'maybe'));
+
+# an option that is not supported is an error rather than ignored
+# xfail spark: intended: the pretty option is not supported yet (https://github.com/apache/datafusion-spark/issues/338)
+query error to_json: unsupported option 'pretty', supported options: ignoreNullFields
+SELECT to_json(named_struct('a', 1::INT), map('pretty', 'true'));
+
+# xfail spark: intended: to_json rejects every option it does not support, Spark ignores the names it does not know
+query error to_json: unsupported option 'noSuchOption', supported options: ignoreNullFields
+SELECT to_json(named_struct('a', 1::INT), map('noSuchOption', 'x'));
+
+# at most two arguments
+query error to_json
+SELECT to_json(named_struct('a', 1::INT), map('a', 'b'), map('c', 'd'));
 
 # types without a Spark JSON representation are rejected at planning time
 # xfail spark: intended: Arrow intervals do not record Spark's start and end fields, so to_json rejects them

@@ -29,11 +29,12 @@ use arrow::temporal_conversions::{
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::utils::take_function_args;
-use datafusion_common::{Result, ScalarValue, exec_datafusion_err, plan_err};
+use datafusion_common::{
+    Result, ScalarValue, exec_datafusion_err, internal_err, plan_err,
+};
 use datafusion_expr::{
     ColumnarValue, Documentation, ScalarFunctionArgs, ScalarUDFImpl, Signature,
-    Volatility,
+    TypeSignature, Volatility,
 };
 use datafusion_macros::user_doc;
 
@@ -89,7 +90,10 @@ impl Default for SparkToJson {
 impl SparkToJson {
     pub fn new() -> Self {
         Self {
-            signature: Signature::any(1, Volatility::Immutable),
+            signature: Signature::one_of(
+                vec![TypeSignature::Any(1), TypeSignature::Any(2)],
+                Volatility::Immutable,
+            ),
         }
     }
 }
@@ -109,15 +113,19 @@ impl ScalarUDFImpl for SparkToJson {
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         match arg_types {
-            [input] => {
+            [input] => check_input_type(input)?,
+            [input, options] => {
                 check_input_type(input)?;
-                Ok(DataType::Utf8)
+                check_options_type(options)?;
             }
-            _ => plan_err!(
-                "to_json expects exactly one argument, got {}",
-                arg_types.len()
-            ),
+            _ => {
+                return plan_err!(
+                    "to_json expects one or two arguments, got {}",
+                    arg_types.len()
+                );
+            }
         }
+        Ok(DataType::Utf8)
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
@@ -127,24 +135,165 @@ impl ScalarUDFImpl for SparkToJson {
             config_options,
             ..
         } = args;
-        let [input] = take_function_args(self.name(), args)?;
-        let [field] = take_function_args(self.name(), arg_fields)?;
+        let (Some(input), Some(field)) = (args.first(), arg_fields.first()) else {
+            return internal_err!("to_json expects one or two arguments");
+        };
+        let options = ToJsonOptions::try_new(args.get(1))?;
 
         match input {
-            ColumnarValue::Array(array) => Ok(ColumnarValue::Array(to_json(
-                &field,
-                &array,
-                &config_options,
-            )?)),
+            ColumnarValue::Array(array) => {
+                let result = to_json(field, array, &config_options, &options)?;
+                Ok(ColumnarValue::Array(result))
+            }
             ColumnarValue::Scalar(scalar) => {
                 let array = scalar.to_array()?;
-                let result = to_json(&field, &array, &config_options)?;
+                let result = to_json(field, &array, &config_options, &options)?;
                 Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(
                     &result, 0,
                 )?))
             }
         }
     }
+}
+
+/// The options of Spark's to_json that are supported.
+///
+/// The names and what they mean are Spark's: to_json takes the options of the
+/// JSON data source, which are listed in
+/// <https://spark.apache.org/docs/latest/sql-data-sources-json.html#data-source-option>
+///
+/// Supporting another of those options starts with a variant here. A name that
+/// is not a variant is an error: ignoring an option that Spark applies would
+/// give a different result without saying so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToJsonOption {
+    /// `ignoreNullFields`: whether NULL struct fields are omitted
+    IgnoreNullFields,
+}
+
+impl ToJsonOption {
+    /// Every supported option.
+    const ALL: [Self; 1] = [Self::IgnoreNullFields];
+
+    /// The option's name in Spark.
+    fn name(self) -> &'static str {
+        match self {
+            Self::IgnoreNullFields => "ignoreNullFields",
+        }
+    }
+
+    /// Finds the option called `name`. Spark's option names are
+    /// case-insensitive.
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|option| option.name().eq_ignore_ascii_case(name))
+    }
+}
+
+/// The values of the supported options (see `ToJsonOption`), with Spark's
+/// defaults.
+#[derive(Debug, Clone, PartialEq)]
+struct ToJsonOptions {
+    /// `ignoreNullFields`: NULL struct fields are omitted rather than written
+    /// as `null`. It is on by default, as Spark's
+    /// `spark.sql.jsonGenerator.ignoreNullFields` is.
+    ignore_null_fields: bool,
+}
+
+impl Default for ToJsonOptions {
+    fn default() -> Self {
+        Self {
+            ignore_null_fields: true,
+        }
+    }
+}
+
+impl ToJsonOptions {
+    /// Reads the options argument, if there is one. Spark only takes a
+    /// `map(...)` call of strings there, so the argument has to be a constant.
+    fn try_new(options: Option<&ColumnarValue>) -> Result<Self> {
+        let mut parsed = Self::default();
+        let Some(options) = options else {
+            return Ok(parsed);
+        };
+        let ColumnarValue::Scalar(ScalarValue::Map(map)) = options else {
+            return plan_err!(
+                "to_json: the options argument must be a constant map of strings"
+            );
+        };
+        check_options_type(map.data_type())?;
+        if map.len() != 1 || map.is_null(0) {
+            return plan_err!("to_json: the options argument must not be NULL");
+        }
+
+        let entries = map.value(0);
+        let keys = cast(entries.column(0), &DataType::Utf8)?;
+        let values = cast(entries.column(1), &DataType::Utf8)?;
+        let (keys, values) = (keys.as_string::<i32>(), values.as_string::<i32>());
+        for i in 0..keys.len() {
+            // Spark turns a NULL value into the string "null"
+            let value = if values.is_null(i) {
+                "null"
+            } else {
+                values.value(i)
+            };
+            parsed.set(keys.value(i), value)?;
+        }
+        Ok(parsed)
+    }
+
+    /// Applies one entry of the options map.
+    fn set(&mut self, key: &str, value: &str) -> Result<()> {
+        match ToJsonOption::parse(key) {
+            Some(ToJsonOption::IgnoreNullFields) => {
+                self.ignore_null_fields = parse_bool(key, value)?;
+            }
+            None => {
+                let supported = ToJsonOption::ALL.map(ToJsonOption::name).join(", ");
+                return plan_err!(
+                    "to_json: unsupported option '{key}', supported options: {supported}"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Parses a boolean option like Scala's `String.toBoolean`: `true` or `false`
+/// in any case, and an error for anything else.
+fn parse_bool(key: &str, value: &str) -> Result<bool> {
+    if value.eq_ignore_ascii_case("true") {
+        Ok(true)
+    } else if value.eq_ignore_ascii_case("false") {
+        Ok(false)
+    } else {
+        plan_err!("to_json: the {key} option must be true or false, got '{value}'")
+    }
+}
+
+/// Whether `data_type` is one of Arrow's string types.
+fn is_string_type(data_type: &DataType) -> bool {
+    use DataType::*;
+    matches!(data_type, Utf8 | LargeUtf8 | Utf8View)
+}
+
+/// Checks the type of the options argument: a map whose keys and values are
+/// strings.
+fn check_options_type(data_type: &DataType) -> Result<()> {
+    let strings = match data_type {
+        DataType::Map(entries, _) => match entries.data_type() {
+            DataType::Struct(kv) => kv.iter().all(|f| is_string_type(f.data_type())),
+            _ => false,
+        },
+        _ => false,
+    };
+    if !strings {
+        return plan_err!(
+            "to_json: the options argument must be a map of strings, got {data_type}"
+        );
+    }
+    Ok(())
 }
 
 /// Checks the type of the value passed to to_json. Spark accepts a struct, a
@@ -222,6 +371,7 @@ fn to_json(
     field: &FieldRef,
     array: &ArrayRef,
     config: &ConfigOptions,
+    options: &ToJsonOptions,
 ) -> Result<ArrayRef> {
     // Spark writes TIMESTAMP values in the session time zone
     let session_tz: Tz = config
@@ -231,12 +381,13 @@ fn to_json(
         .map(|tz| tz.as_str())
         .unwrap_or("+00:00")
         .parse()?;
-    let options = EncoderOptions::default()
-        // Spark default: ignoreNullFields = true -> NULL struct fields are omitted
-        .with_explicit_nulls(false)
+    let encoder_options = EncoderOptions::default()
+        // ignoreNullFields: NULL struct fields are omitted (Spark's default) or
+        // written as null
+        .with_explicit_nulls(!options.ignore_null_fields)
         .with_encoder_factory(Arc::new(SparkJsonEncoderFactory { session_tz }));
 
-    let mut encoder = make_encoder(field, array.as_ref(), &options)?;
+    let mut encoder = make_encoder(field, array.as_ref(), &encoder_options)?;
     let mut builder = StringBuilder::with_capacity(array.len(), array.len() * 32);
     let mut buf: Vec<u8> = Vec::with_capacity(128);
     for row in 0..array.len() {
@@ -755,7 +906,7 @@ impl<'a> SparkMapEncoder<'a> {
     ) -> Result<Self, ArrowError> {
         let keys = MapKeyEncoder::try_new(array.keys())?;
         // The value encoder is built with the same options, so nested structs
-        // keep omitting NULL fields and nested maps use this encoder.
+        // treat NULL fields the same way and nested maps use this encoder.
         let values = make_encoder(field, array.values(), options)?;
 
         Ok(Self {
@@ -992,6 +1143,57 @@ mod tests {
             .to_array(number_rows)
     }
 
+    /// A `map(...)` literal of string options, as the function receives it.
+    fn options_scalar(options: &[(&str, Option<&str>)]) -> ColumnarValue {
+        let mut mb = MapBuilder::new(None, StringBuilder::new(), StringBuilder::new());
+        for (key, value) in options {
+            mb.keys().append_value(key);
+            mb.values().append_option(*value);
+        }
+        mb.append(true).unwrap();
+        ColumnarValue::Scalar(ScalarValue::Map(Arc::new(mb.finish())))
+    }
+
+    /// Parses a `map(...)` literal of options.
+    fn parse_options(options: &[(&str, Option<&str>)]) -> Result<ToJsonOptions> {
+        ToJsonOptions::try_new(Some(&options_scalar(options)))
+    }
+
+    /// Like `run`, with a `map(...)` literal of options as the second argument.
+    fn run_with_options(
+        input: ColumnarValue,
+        field: FieldRef,
+        options: &[(&str, Option<&str>)],
+    ) -> Result<ArrayRef> {
+        let number_rows = match &input {
+            ColumnarValue::Array(a) => a.len(),
+            ColumnarValue::Scalar(_) => 1,
+        };
+        let options = options_scalar(options);
+        let options_field = Arc::new(Field::new("options", options.data_type(), false));
+        let args = ScalarFunctionArgs {
+            args: vec![input, options],
+            arg_fields: vec![field, options_field],
+            number_rows,
+            return_field: Field::new("to_json", DataType::Utf8, true).into(),
+            config_options: Arc::new(ConfigOptions::default()),
+        };
+        SparkToJson::new()
+            .invoke_with_args(args)?
+            .to_array(number_rows)
+    }
+
+    /// List<Struct<a: Int32>> with one row: [{a: 1}, {a: NULL}, NULL]
+    fn sample_list_of_structs() -> ListArray {
+        let a = Arc::new(Int32Array::from(vec![Some(1), None, None])) as ArrayRef;
+        let fields = Fields::from(vec![Field::new("a", DataType::Int32, true)]);
+        let nulls = NullBuffer::from(vec![true, true, false]);
+        let structs = StructArray::new(fields, vec![a], Some(nulls));
+        let item = Arc::new(Field::new("item", structs.data_type().clone(), true));
+        let offsets = OffsetBuffer::new(vec![0, 3].into());
+        ListArray::new(item, offsets, Arc::new(structs), None)
+    }
+
     fn sample_struct() -> StructArray {
         let a = Arc::new(Int32Array::from(vec![Some(1), Some(2), Some(3)])) as ArrayRef;
         let b = Arc::new(StringArray::from(vec![Some("x"), None, Some("z")])) as ArrayRef;
@@ -1217,7 +1419,195 @@ mod tests {
         );
 
         let err = SparkToJson::new().return_type(&[]).unwrap_err();
-        assert!(err.to_string().contains("exactly one argument"));
+        assert!(err.to_string().contains("one or two arguments"));
+    }
+
+    #[test]
+    fn test_return_type_checks_options_type() {
+        let func = SparkToJson::new();
+        let fields = Fields::from(vec![Field::new("a", DataType::Int32, true)]);
+        let input = DataType::Struct(fields);
+        let map_of = |k: DataType, v: DataType| {
+            let entries = Fields::from(vec![
+                Field::new("keys", k, false),
+                Field::new("values", v, true),
+            ]);
+            DataType::Map(
+                Arc::new(Field::new("entries", DataType::Struct(entries), false)),
+                false,
+            )
+        };
+
+        let options = map_of(DataType::Utf8, DataType::Utf8);
+        assert_eq!(
+            func.return_type(&[input.clone(), options]).unwrap(),
+            DataType::Utf8
+        );
+
+        // Spark takes a map of strings and nothing else
+        for options in [
+            map_of(DataType::Utf8, DataType::Int32),
+            map_of(DataType::Int32, DataType::Utf8),
+            DataType::Utf8,
+            DataType::Null,
+        ] {
+            let err = func.return_type(&[input.clone(), options]).unwrap_err();
+            assert!(err.to_string().contains("map of strings"), "{err}");
+        }
+
+        let err = func
+            .return_type(&[input.clone(), input.clone(), input])
+            .unwrap_err();
+        assert!(err.to_string().contains("one or two arguments"), "{err}");
+    }
+
+    #[test]
+    fn test_options_default() {
+        assert!(ToJsonOptions::try_new(None).unwrap().ignore_null_fields);
+        assert!(parse_options(&[]).unwrap().ignore_null_fields);
+    }
+
+    #[test]
+    fn test_ignore_null_fields_option_is_parsed() {
+        // option names and boolean values are case-insensitive, as in Spark
+        for (key, value, expected) in [
+            ("ignoreNullFields", "false", false),
+            ("ignoreNullFields", "true", true),
+            ("IGNORENULLFIELDS", "False", false),
+            ("ignorenullfields", "TRUE", true),
+        ] {
+            let options = parse_options(&[(key, Some(value))]).unwrap();
+            assert_eq!(options.ignore_null_fields, expected, "{key}={value}");
+        }
+    }
+
+    #[test]
+    fn test_invalid_boolean_option_errors() {
+        // Scala's toBoolean takes true and false only; Spark reads a NULL
+        // value as the string "null"
+        for value in [Some("yes"), Some("1"), Some(""), None] {
+            let err = parse_options(&[("ignoreNullFields", value)]).unwrap_err();
+            assert!(err.to_string().contains("must be true or false"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_supported_option_names() {
+        // the names are Spark's, and are matched case-insensitively
+        assert_eq!(ToJsonOption::IgnoreNullFields.name(), "ignoreNullFields");
+        for name in ["ignoreNullFields", "IGNORENULLFIELDS", "ignorenullfields"] {
+            let option = ToJsonOption::parse(name);
+            assert_eq!(option, Some(ToJsonOption::IgnoreNullFields));
+        }
+        assert_eq!(ToJsonOption::parse("pretty"), None);
+
+        // every option has its own name
+        for option in ToJsonOption::ALL {
+            assert_eq!(ToJsonOption::parse(option.name()), Some(option));
+        }
+    }
+
+    #[test]
+    fn test_other_options_are_rejected() {
+        // options of Spark's to_json that are not supported, and a name that
+        // Spark does not know; the error lists what is supported
+        for key in ["pretty", "timeZone", "dateFormat", "noSuchOption"] {
+            let err = parse_options(&[(key, Some("x"))]).unwrap_err();
+            let err = err.to_string();
+            let needle = format!("unsupported option '{key}'");
+            assert!(err.contains(&needle), "{err}");
+            assert!(err.contains("options: ignoreNullFields"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_options_must_be_a_constant_map_of_strings() {
+        // a column of maps
+        let column = ColumnarValue::Array(Arc::new(sample_map()));
+        let err = ToJsonOptions::try_new(Some(&column)).unwrap_err();
+        assert!(err.to_string().contains("constant map"), "{err}");
+
+        // a map whose values are not strings (sample_map is a Map<Utf8, Int32>)
+        let scalar = ScalarValue::Map(Arc::new(sample_map().slice(0, 1)));
+        let options = ColumnarValue::Scalar(scalar);
+        let err = ToJsonOptions::try_new(Some(&options)).unwrap_err();
+        assert!(err.to_string().contains("map of strings"), "{err}");
+
+        // a NULL map
+        let mut mb = MapBuilder::new(None, StringBuilder::new(), StringBuilder::new());
+        mb.append(false).unwrap();
+        let null_map = ColumnarValue::Scalar(ScalarValue::Map(Arc::new(mb.finish())));
+        let err = ToJsonOptions::try_new(Some(&null_map)).unwrap_err();
+        assert!(err.to_string().contains("must not be NULL"), "{err}");
+    }
+
+    #[test]
+    fn test_ignore_null_fields_false_writes_null_struct_fields() {
+        let input = sample_struct();
+        let field = field_of(&input);
+        let input = ColumnarValue::Array(Arc::new(input));
+        let options = [("ignoreNullFields", Some("false"))];
+        let out = run_with_options(input, field, &options).unwrap();
+        let out = as_string_array(&out).unwrap();
+
+        assert_eq!(out.value(0), r#"{"a":1,"b":"x","c":true}"#);
+        // the NULL field is written rather than omitted
+        assert_eq!(out.value(1), r#"{"a":2,"b":null,"c":false}"#);
+        // a NULL struct row is NULL whatever the options
+        assert!(out.is_null(2));
+    }
+
+    #[test]
+    fn test_ignore_null_fields_true_is_the_default() {
+        let input = sample_struct();
+        let field = field_of(&input);
+        let input = ColumnarValue::Array(Arc::new(input));
+        let options = [("ignoreNullFields", Some("true"))];
+        let out = run_with_options(input, field, &options).unwrap();
+        let out = as_string_array(&out).unwrap();
+
+        assert_eq!(out.value(1), r#"{"a":2,"c":false}"#);
+    }
+
+    #[test]
+    fn test_ignore_null_fields_false_inside_an_array() {
+        let input = sample_list_of_structs();
+        let field = field_of(&input);
+        let input = ColumnarValue::Array(Arc::new(input));
+        let options = [("ignoreNullFields", Some("false"))];
+        let out = run_with_options(input, field, &options).unwrap();
+        let out = as_string_array(&out).unwrap();
+
+        assert_eq!(out.value(0), r#"[{"a":1},{"a":null},null]"#);
+    }
+
+    #[test]
+    fn test_ignore_null_fields_does_not_apply_to_map_values() {
+        // NULL map values are written as null with either setting
+        for value in ["true", "false"] {
+            let input = sample_map();
+            let field = field_of(&input);
+            let input = ColumnarValue::Array(Arc::new(input));
+            let options = [("ignoreNullFields", Some(value))];
+            let out = run_with_options(input, field, &options).unwrap();
+            let out = as_string_array(&out).unwrap();
+
+            assert_eq!(out.value(0), r#"{"a":1,"b":null}"#);
+        }
+    }
+
+    #[test]
+    fn test_scalar_input_with_options() {
+        let input = sample_struct();
+        let field = field_of(&input);
+        let scalar = ScalarValue::Struct(Arc::new(input.slice(1, 1)));
+        let options = [("ignoreNullFields", Some("false"))];
+        let out = run_with_options(ColumnarValue::Scalar(scalar), field, &options);
+        let out = out.unwrap();
+        let out = as_string_array(&out).unwrap();
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.value(0), r#"{"a":2,"b":null,"c":false}"#);
     }
 
     #[test]
@@ -1420,14 +1810,7 @@ mod tests {
 
     #[test]
     fn test_list_of_structs_input() {
-        // one row: [{a: 1}, {a: NULL}, NULL]
-        let a = Arc::new(Int32Array::from(vec![Some(1), None, None])) as ArrayRef;
-        let fields = Fields::from(vec![Field::new("a", DataType::Int32, true)]);
-        let nulls = NullBuffer::from(vec![true, true, false]);
-        let structs = StructArray::new(fields, vec![a], Some(nulls));
-        let item = Arc::new(Field::new("item", structs.data_type().clone(), true));
-        let offsets = OffsetBuffer::new(vec![0, 3].into());
-        let input = ListArray::new(item, offsets, Arc::new(structs), None);
+        let input = sample_list_of_structs();
         let field = field_of(&input);
 
         let out = run(ColumnarValue::Array(Arc::new(input)), field).unwrap();
