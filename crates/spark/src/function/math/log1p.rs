@@ -2,14 +2,15 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
-use crate::function::error_utils::unsupported_data_type_exec_err;
+use crate::function::implicit_cast::{SparkInputType, SparkInputTypes};
 use arrow::array::{ArrayRef, AsArray, Float64Array};
 use arrow::datatypes::{DataType, Float64Type};
+use datafusion_common::config::ConfigOptions;
 use datafusion_common::utils::take_function_args;
-use datafusion_common::{Result, ScalarValue};
+use datafusion_common::{Result, ScalarValue, internal_err};
 use datafusion_expr::{
-    ColumnarValue, Documentation, ScalarFunctionArgs, ScalarUDFImpl, Signature,
-    Volatility,
+    ColumnarValue, Documentation, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
+    Signature, Volatility,
 };
 use datafusion_macros::user_doc;
 use std::sync::Arc;
@@ -35,7 +36,7 @@ NULL
 )]
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SparkLog1p {
-    signature: Signature,
+    input_types: SparkInputTypes,
 }
 
 impl Default for SparkLog1p {
@@ -47,7 +48,10 @@ impl Default for SparkLog1p {
 impl SparkLog1p {
     pub fn new() -> Self {
         Self {
-            signature: Signature::exact(vec![DataType::Float64], Volatility::Immutable),
+            input_types: SparkInputTypes::new(
+                vec![SparkInputType::Double],
+                Volatility::Immutable,
+            ),
         }
     }
 }
@@ -58,7 +62,16 @@ impl ScalarUDFImpl for SparkLog1p {
     }
 
     fn signature(&self) -> &Signature {
-        &self.signature
+        self.input_types.signature()
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        self.input_types.coerce(self.name(), arg_types)
+    }
+
+    fn with_updated_config(&self, config: &ConfigOptions) -> Option<ScalarUDF> {
+        let input_types = self.input_types.with_config(config)?;
+        Some(ScalarUDF::from(Self { input_types }))
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
@@ -78,27 +91,19 @@ impl ScalarUDFImpl for SparkLog1p {
                     value.and_then(log1p_or_null),
                 )))
             }
-            ColumnarValue::Array(array) => match array.data_type() {
-                DataType::Float64 => {
-                    let result: Float64Array = array
-                        .as_primitive::<Float64Type>()
-                        .iter()
-                        .map(|value| value.and_then(log1p_or_null))
-                        .collect();
+            ColumnarValue::Array(array) => {
+                let result: Float64Array = array
+                    .as_primitive::<Float64Type>()
+                    .iter()
+                    .map(|value| value.and_then(log1p_or_null))
+                    .collect();
 
-                    Ok(ColumnarValue::Array(Arc::new(result) as ArrayRef))
-                }
-                other => Err(unsupported_data_type_exec_err(
-                    "log1p",
-                    format!("{}", DataType::Float64).as_str(),
-                    other,
-                )),
-            },
-            other => Err(unsupported_data_type_exec_err(
-                "log1p",
-                format!("{}", DataType::Float64).as_str(),
-                &other.data_type(),
-            )),
+                Ok(ColumnarValue::Array(Arc::new(result) as ArrayRef))
+            }
+            other => internal_err!(
+                "Unexpected argument type for log1p after coercion: {}",
+                other.data_type()
+            ),
         }
     }
 }

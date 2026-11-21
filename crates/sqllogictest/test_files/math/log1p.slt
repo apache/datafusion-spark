@@ -62,12 +62,12 @@ FROM (VALUES
 NULL
 
 # Small inputs retain precision near zero
-query T
+query B
 SELECT log1p(1e-300::DOUBLE) = 1e-300::DOUBLE;
 ----
 true
 
-query T
+query B
 SELECT log1p(1e-20::DOUBLE) = 1e-20::DOUBLE;
 ----
 true
