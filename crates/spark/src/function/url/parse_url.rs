@@ -102,39 +102,136 @@ impl ParseUrl {
                 ))
             };
         }
-        url.map_err(|e| exec_datafusion_err!("{e:?}"))
-            .map(|url| match part {
-                "HOST" => url.host_str().map(String::from),
-                "PATH" => {
-                    let path = Self::path(value, &url);
-                    Some(path.to_string())
-                }
-                "QUERY" => match key {
-                    None => url.query().map(String::from),
-                    Some(key) => Self::query_value(url.query(), key).map(String::from),
-                },
-                "REF" => url.fragment().map(String::from),
-                "PROTOCOL" => Some(url.scheme().to_string()),
-                "FILE" => {
-                    let path = Self::path(value, &url);
-                    match url.query() {
-                        Some(query) => Some(format!("{path}?{query}")),
-                        None => Some(path.to_string()),
+        match url {
+            Ok(url) => Ok(Self::extract_url_part(value, &url, part, key)),
+            Err(ParseError::InvalidPort) => {
+                if let Some((temp_url, raw_authority, is_spark_host)) =
+                    Self::normalize_invalid_port_url(value)
+                {
+                    if part == "AUTHORITY" {
+                        return Ok(Some(raw_authority));
                     }
-                }
-                "AUTHORITY" => Some(url.authority().to_string()),
-                "USERINFO" => {
-                    let username = url.username();
-                    if username.is_empty() {
-                        return None;
+                    if part == "HOST" {
+                        return Ok(if is_spark_host {
+                            temp_url.host_str().map(String::from)
+                        } else {
+                            None
+                        });
                     }
-                    match url.password() {
-                        Some(password) => Some(format!("{username}:{password}")),
-                        None => Some(username.to_string()),
-                    }
+                    return Ok(Self::extract_url_part(value, &temp_url, part, key));
                 }
-                _ => None,
-            })
+                Err(exec_datafusion_err!("{:?}", ParseError::InvalidPort))
+            }
+            Err(e) => Err(exec_datafusion_err!("{e:?}")),
+        }
+    }
+
+    fn extract_url_part(
+        value: &str,
+        url: &Url,
+        part: &str,
+        key: Option<&str>,
+    ) -> Option<String> {
+        match part {
+            "HOST" => url.host_str().map(String::from),
+            "PATH" => {
+                let path = Self::path(value, url);
+                Some(path.to_string())
+            }
+            "QUERY" => match key {
+                None => url.query().map(String::from),
+                Some(key) => Self::query_value(url.query(), key).map(String::from),
+            },
+            "REF" => url.fragment().map(String::from),
+            "PROTOCOL" => Some(url.scheme().to_string()),
+            "FILE" => {
+                let path = Self::path(value, url);
+                match url.query() {
+                    Some(query) => Some(format!("{path}?{query}")),
+                    None => Some(path.to_string()),
+                }
+            }
+            "AUTHORITY" => Some(url.authority().to_string()),
+            "USERINFO" => {
+                let username = url.username();
+                if username.is_empty() {
+                    return None;
+                }
+                match url.password() {
+                    Some(password) => Some(format!("{username}:{password}")),
+                    None => Some(username.to_string()),
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// When `Url::parse` returns `ParseError::InvalidPort`, attempt to isolate the
+    /// authority component and substitute a valid port (`:80`) so that the standard
+    /// parser can extract components with Spark compatibility (issue #365).
+    ///
+    /// Returns `Some((temp_url, raw_authority, is_spark_host))` if the URL
+    /// structure conforms to an authority with a port specification, or `None` if
+    /// the URL is structurally malformed.
+    fn normalize_invalid_port_url(value: &str) -> Option<(Url, String, bool)> {
+        let auth_start = value.find("://")? + 3;
+        let rest = &value[auth_start..];
+        let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let raw_authority = &rest[..auth_end];
+        let path_and_beyond = &rest[auth_end..];
+
+        // Java URI throws URISyntaxException for any whitespace in authority
+        if raw_authority.chars().any(char::is_whitespace) {
+            return None;
+        }
+
+        // Locate userinfo if present
+        let (userinfo_prefix, host_port) = match raw_authority.rfind('@') {
+            Some(at_idx) => (&raw_authority[..=at_idx], &raw_authority[at_idx + 1..]),
+            None => ("", raw_authority),
+        };
+
+        // Locate port colon, taking care not to match colons inside IPv6 brackets [::1]
+        let port_colon_pos = if host_port.starts_with('[') {
+            let bracket_end = host_port.find(']')?;
+            let after_bracket = &host_port[bracket_end..];
+            let colon_offset = after_bracket.find(':')?;
+            bracket_end + colon_offset
+        } else {
+            host_port.find(':')?
+        };
+
+        let host = &host_port[..port_colon_pos];
+        let port_str = &host_port[port_colon_pos + 1..];
+
+        // Host cannot be empty and port string cannot be empty
+        if host.is_empty() || port_str.is_empty() {
+            return None;
+        }
+
+        // For IPv6, extra colons in port are invalid
+        if host_port.starts_with('[') && port_str.contains(':') {
+            return None;
+        }
+
+        // Spark (via java.net.URI) extracts the host if the port can be parsed as a 32-bit
+        // signed integer (e.g. 65536, 99999, 1000000). For non-numeric ports or ports > i32::MAX,
+        // Spark treats the host as null, but still extracts authority, path, query, and ref.
+        let is_spark_host = port_str.chars().all(|c| c.is_ascii_digit())
+            && port_str.parse::<i32>().is_ok();
+
+        // Construct a sanitized URL with a placeholder valid port (:80)
+        let sanitized = format!(
+            "{}{}{}:80{}",
+            &value[..auth_start],
+            userinfo_prefix,
+            host,
+            path_and_beyond
+        );
+
+        let temp_url = Url::parse(&sanitized).ok()?;
+
+        Some((temp_url, raw_authority.to_string(), is_spark_host))
     }
 
     fn path<'a>(value: &str, url: &'a Url) -> &'a str {
@@ -662,6 +759,321 @@ mod tests {
             let err = spark_parse_url(from_ref(&urls), eval_mode).unwrap_err();
             assert!(format!("{err}").contains("expects 2 or 3 arguments"));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_url_port_overflow_and_spark_parity() -> Result<()> {
+        // Standard non-default port (8080)
+        let u8080 = "http://spark.apache.org:8080/path?query=1#ref";
+        assert_eq!(
+            ParseUrl::parse(u8080, "HOST", None)?,
+            Some("spark.apache.org".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u8080, "AUTHORITY", None)?,
+            Some("spark.apache.org:8080".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u8080, "PATH", None)?,
+            Some("/path".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u8080, "QUERY", None)?,
+            Some("query=1".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u8080, "REF", None)?,
+            Some("ref".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u8080, "PROTOCOL", None)?,
+            Some("http".to_string())
+        );
+
+        // Standard default port (80) - WHATWG url crate omits default port in authority
+        let u80 = "http://spark.apache.org:80/path";
+        assert_eq!(
+            ParseUrl::parse(u80, "HOST", None)?,
+            Some("spark.apache.org".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u80, "AUTHORITY", None)?,
+            Some("spark.apache.org".to_string())
+        );
+
+        // Port 65535 (maximum valid u16 port)
+        let u65535 = "http://spark.apache.org:65535/path?query=1#ref";
+        assert_eq!(
+            ParseUrl::parse(u65535, "HOST", None)?,
+            Some("spark.apache.org".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u65535, "AUTHORITY", None)?,
+            Some("spark.apache.org:65535".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u65535, "PATH", None)?,
+            Some("/path".to_string())
+        );
+
+        // Port 65536 (boundary above u16, issue #365)
+        let u65536 = "http://spark.apache.org:65536/path?query=1#ref";
+        assert_eq!(
+            ParseUrl::parse(u65536, "HOST", None)?,
+            Some("spark.apache.org".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u65536, "AUTHORITY", None)?,
+            Some("spark.apache.org:65536".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u65536, "PATH", None)?,
+            Some("/path".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u65536, "QUERY", None)?,
+            Some("query=1".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u65536, "REF", None)?,
+            Some("ref".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u65536, "PROTOCOL", None)?,
+            Some("http".to_string())
+        );
+
+        // Port 99999 (reported issue #365)
+        let u99999 = "http://spark.apache.org:99999/path?query=1#ref";
+        assert_eq!(
+            ParseUrl::parse(u99999, "HOST", None)?,
+            Some("spark.apache.org".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u99999, "AUTHORITY", None)?,
+            Some("spark.apache.org:99999".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u99999, "PATH", None)?,
+            Some("/path".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u99999, "QUERY", None)?,
+            Some("query=1".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u99999, "REF", None)?,
+            Some("ref".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u99999, "PROTOCOL", None)?,
+            Some("http".to_string())
+        );
+
+        // Port significantly larger than 99999 (fits in 32-bit signed int, e.g. 1000000)
+        let u1m = "http://spark.apache.org:1000000/path?query=1#ref";
+        assert_eq!(
+            ParseUrl::parse(u1m, "HOST", None)?,
+            Some("spark.apache.org".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u1m, "AUTHORITY", None)?,
+            Some("spark.apache.org:1000000".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u1m, "PATH", None)?,
+            Some("/path".to_string())
+        );
+
+        // Port exceeding 32-bit signed int (> 2147483647): Spark treats host as null, but keeps authority & path
+        let u_big = "http://spark.apache.org:9999999999/path?query=1#ref";
+        assert_eq!(ParseUrl::parse(u_big, "HOST", None)?, None);
+        assert_eq!(
+            ParseUrl::parse(u_big, "AUTHORITY", None)?,
+            Some("spark.apache.org:9999999999".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_big, "PATH", None)?,
+            Some("/path".to_string())
+        );
+
+        // No port
+        let u_no_port = "http://spark.apache.org/path?query=1#ref";
+        assert_eq!(
+            ParseUrl::parse(u_no_port, "HOST", None)?,
+            Some("spark.apache.org".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_no_port, "AUTHORITY", None)?,
+            Some("spark.apache.org".to_string())
+        );
+
+        // Empty port (:path)
+        let u_empty_port = "http://spark.apache.org:/path?query=1#ref";
+        assert_eq!(
+            ParseUrl::parse(u_empty_port, "HOST", None)?,
+            Some("spark.apache.org".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_empty_port, "PATH", None)?,
+            Some("/path".to_string())
+        );
+
+        // Non-numeric port (:abc): Spark treats host as null, but extracts authority & path
+        let u_abc = "http://spark.apache.org:abc/path?query=1#ref";
+        assert_eq!(ParseUrl::parse(u_abc, "HOST", None)?, None);
+        assert_eq!(
+            ParseUrl::parse(u_abc, "AUTHORITY", None)?,
+            Some("spark.apache.org:abc".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_abc, "PATH", None)?,
+            Some("/path".to_string())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_url_structures_with_overflow_port() -> Result<()> {
+        // IPv4 host with port 99999
+        let u_ipv4 = "http://127.0.0.1:99999/path";
+        assert_eq!(
+            ParseUrl::parse(u_ipv4, "HOST", None)?,
+            Some("127.0.0.1".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_ipv4, "AUTHORITY", None)?,
+            Some("127.0.0.1:99999".to_string())
+        );
+
+        // IPv6 host with port 99999
+        let u_ipv6 = "http://[::1]:99999/path";
+        assert_eq!(
+            ParseUrl::parse(u_ipv6, "HOST", None)?,
+            Some("[::1]".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_ipv6, "AUTHORITY", None)?,
+            Some("[::1]:99999".to_string())
+        );
+
+        // Userinfo with port 99999
+        let u_user = "https://user:pass@spark.apache.org:99999/path";
+        assert_eq!(
+            ParseUrl::parse(u_user, "HOST", None)?,
+            Some("spark.apache.org".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_user, "USERINFO", None)?,
+            Some("user:pass".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_user, "AUTHORITY", None)?,
+            Some("user:pass@spark.apache.org:99999".to_string())
+        );
+
+        // Encoded characters in path, query, and ref
+        let u_enc = "http://spark.apache.org:99999/pa%20th?q=hello%20world#frag%20ment";
+        assert_eq!(
+            ParseUrl::parse(u_enc, "HOST", None)?,
+            Some("spark.apache.org".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_enc, "PATH", None)?,
+            Some("/pa%20th".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_enc, "QUERY", None)?,
+            Some("q=hello%20world".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_enc, "REF", None)?,
+            Some("frag%20ment".to_string())
+        );
+
+        // Empty path with port 99999
+        let u_empty_path = "http://spark.apache.org:99999";
+        assert_eq!(
+            ParseUrl::parse(u_empty_path, "HOST", None)?,
+            Some("spark.apache.org".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_empty_path, "PATH", None)?,
+            Some("".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_empty_path, "FILE", None)?,
+            Some("".to_string())
+        );
+
+        // Query only (empty path) with port 99999
+        let u_query_only = "http://spark.apache.org:99999?query=1";
+        assert_eq!(
+            ParseUrl::parse(u_query_only, "HOST", None)?,
+            Some("spark.apache.org".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_query_only, "PATH", None)?,
+            Some("".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_query_only, "QUERY", None)?,
+            Some("query=1".to_string())
+        );
+        assert_eq!(
+            ParseUrl::parse(u_query_only, "FILE", None)?,
+            Some("?query=1".to_string())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_url_overflow_port_eval_modes() -> Result<()> {
+        let urls = sa(&[
+            Some("http://spark.apache.org:99999/path"),
+            Some("inva lid://example.com"),
+        ]);
+        let parts = sa(&[Some("HOST"), Some("HOST")]);
+
+        // Legacy and Try modes return host for 99999 and NULL for malformed URL
+        for eval_mode in [EvalMode::Legacy, EvalMode::Try] {
+            let out =
+                spark_parse_url(&[Arc::clone(&urls), Arc::clone(&parts)], eval_mode)?;
+            let out_sa = out.as_any().downcast_ref::<StringArray>().unwrap();
+            assert_eq!(out_sa.value(0), "spark.apache.org");
+            assert!(out_sa.is_null(1));
+        }
+
+        // Ansi mode succeeds for port 99999
+        let valid_99999 = sa(&[Some("http://spark.apache.org:99999/path")]);
+        let valid_part = sa(&[Some("HOST")]);
+        let out = spark_parse_url(&[valid_99999, valid_part], EvalMode::Ansi)?;
+        let out_sa = out.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(out_sa.value(0), "spark.apache.org");
+
+        // Ansi mode continues to error on truly malformed URLs
+        let err =
+            spark_parse_url(&[Arc::clone(&urls), Arc::clone(&parts)], EvalMode::Ansi)
+                .unwrap_err();
+        assert!(
+            format!("{err}").contains("The url is invalid")
+                || format!("{err}").contains("Execution error")
+        );
+
+        // Ansi mode errors on invalid IPv6 without closing bracket
+        let bad_ipv6 = sa(&[Some("http://[::1/path")]);
+        let bad_part = sa(&[Some("HOST")]);
+        assert!(spark_parse_url(&[bad_ipv6, bad_part], EvalMode::Ansi).is_err());
+
+        // Ansi mode errors on whitespace in authority
+        let space_auth = sa(&[Some("http://spark.apache.org: 99999/path")]);
+        assert!(
+            spark_parse_url(&[space_auth, sa(&[Some("HOST")])], EvalMode::Ansi).is_err()
+        );
+
         Ok(())
     }
 }

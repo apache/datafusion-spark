@@ -336,11 +336,45 @@ SELECT parse_url('inva lid://spark.apache.org/path?query=1', 'QUERY');
 ----
 NULL
 
-# xfail spark: Spark does not range-check the port, so it returns the host for a port above 65535 (https://github.com/apache/datafusion-spark/issues/365)
 query T
 SELECT parse_url('http://spark.apache.org:99999/path', 'HOST');
 ----
-NULL
+spark.apache.org
+
+query T
+SELECT parse_url('http://spark.apache.org:99999/path?query=1#ref', 'AUTHORITY');
+----
+spark.apache.org:99999
+
+query T
+SELECT parse_url('http://spark.apache.org:99999/path?query=1#ref', 'PATH');
+----
+/path
+
+query T
+SELECT parse_url('http://spark.apache.org:99999/path?query=1#ref', 'QUERY');
+----
+query=1
+
+query T
+SELECT parse_url('http://spark.apache.org:99999/path?query=1#ref', 'REF');
+----
+ref
+
+query T
+SELECT parse_url('http://spark.apache.org:99999/path?query=1#ref', 'PROTOCOL');
+----
+http
+
+query T
+SELECT parse_url('http://[::1]:99999/path', 'HOST');
+----
+[::1]
+
+query T
+SELECT parse_url('http://[::1]:99999/path', 'AUTHORITY');
+----
+[::1]:99999
 
 # Mixed rows: a valid URL, a malformed URL and NULL
 query T
@@ -361,9 +395,10 @@ set datafusion.execution.enable_ansi_mode = true;
 query error DataFusion error: Execution error: The url is invalid: inva lid://spark\.apache\.org/path\?query=1\. Use `try_parse_url` to tolerate invalid URL and return NULL instead\. SQLSTATE: 22P02
 SELECT parse_url('inva lid://spark.apache.org/path?query=1', 'QUERY');
 
-# xfail spark: Spark does not range-check the port, so it returns the host for a port above 65535 (https://github.com/apache/datafusion-spark/issues/365)
-query error DataFusion error: Execution error: InvalidPort
+query T
 SELECT parse_url('http://spark.apache.org:99999/path', 'HOST');
+----
+spark.apache.org
 
 # try_parse_url still returns NULL when ANSI mode is on
 query T
