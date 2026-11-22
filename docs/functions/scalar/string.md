@@ -36,6 +36,7 @@ Part of the [datafusion-spark function reference](../README.md).
 - [space](#space)
 - [substr](#substr)
 - [substring](#substring)
+- [substring_index](#substring_index)
 
 ## `ascii`
 
@@ -497,3 +498,28 @@ substr(str, pos[, length])
 ### Aliases
 
 - substr
+
+## `substring_index`
+
+Returns the part of `str` before the `count`-th delimiter from the left for positive counts, or after the |count|-th delimiter from the right for negative counts. Unlike DataFusion's `substr_index`, delimiter matches may overlap: `substring_index('||||||', '|||', 3)` returns `||`. Matching is case-sensitive and byte-exact (UTF8_BINARY); other Spark collations are not supported. Fewer matches returns the whole string. Zero count or an empty delimiter returns an empty string. NULL in any argument returns NULL. Count uses Spark's INT type; INT_MIN with a nonempty delimiter raises an error, as in Spark. Implicit cast behavior still depends on the shared CAST work in https://github.com/apache/datafusion-spark/issues/88.
+
+```sql
+substring_index(str, delim, count)
+```
+
+### Arguments
+
+- **str**: String to search. NULL returns NULL.
+- **delim**: Case-sensitive delimiter. Matches may overlap; an empty delimiter returns an empty string.
+- **count**: Occurrence count, implicitly cast to INT. Positive searches from the left, negative from the right, and zero returns an empty string.
+
+### Example
+
+```sql
+> SELECT substring_index('www.apache.org', '.', 2);
+www.apache
+> SELECT substring_index('www.apache.org', '.', -2);
+apache.org
+> SELECT substring_index('||||||', '|||', 3);
+||
+```

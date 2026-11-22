@@ -24,6 +24,7 @@ pub mod quote;
 pub mod soundex;
 pub mod space;
 pub mod substring;
+pub mod substring_index;
 pub mod to_binary;
 
 use datafusion_expr::ScalarUDF;
@@ -45,6 +46,7 @@ make_udf_function!(luhn_check::SparkLuhnCheck, luhn_check);
 make_udf_function!(format_string::FormatStringFunc, format_string);
 make_udf_function!(space::SparkSpace, space);
 make_udf_function!(substring::SparkSubstring, substring);
+make_udf_function!(substring_index::SparkSubstringIndex, substring_index);
 make_udf_function!(base64::SparkUnBase64, unbase64);
 make_udf_function!(soundex::SparkSoundex, soundex);
 make_udf_function!(make_valid_utf8::SparkMakeValidUtf8, make_valid_utf8);
@@ -128,6 +130,11 @@ pub mod expr_fn {
         str pos length
     ));
     export_functions!((
+        substring_index,
+        "Returns the part of a string before or after a delimiter occurrence, including overlapping matches.",
+        str delim count
+    ));
+    export_functions!((
         unbase64,
         "Decodes the input string `str` from a base64 string into binary data.",
         str
@@ -177,6 +184,7 @@ pub fn functions() -> Vec<Arc<ScalarUDF>> {
         format_string(),
         space(),
         substring(),
+        substring_index(),
         unbase64(),
         soundex(),
         make_valid_utf8(),

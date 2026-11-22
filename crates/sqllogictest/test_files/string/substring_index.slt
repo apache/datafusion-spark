@@ -8,7 +8,577 @@
 # For more information, please see:
 #   https://github.com/apache/datafusion/issues/15914
 
-## Original Query: SELECT substring_index('www.apache.org', '.', 2);
-## PySpark 3.5.5 Result: {'substring_index(www.apache.org, ., 2)': 'www.apache', 'typeof(substring_index(www.apache.org, ., 2))': 'string', 'typeof(www.apache.org)': 'string', 'typeof(.)': 'string', 'typeof(2)': 'int'}
-#query
-#SELECT substring_index('www.apache.org'::string, '.'::string, 2::int);
+# Expected results verified against Apache Spark 4.2.0. UTF8_BINARY only.
+
+query T
+SELECT substring_index(s, d, c) FROM (VALUES
+  ('www.apache.org', '.', (3)::INT),
+  ('www.apache.org', '.', (2)::INT),
+  ('www.apache.org', '.', (1)::INT),
+  ('www.apache.org', '.', (0)::INT),
+  ('www.apache.org', '.', (-1)::INT),
+  ('www.apache.org', '.', (-2)::INT),
+  ('www.apache.org', '.', (-3)::INT),
+  ('www.apache.org', '.', (10)::INT),
+  ('www.apache.org', '.', (-10)::INT),
+  ('', '.', (1)::INT),
+  ('', '.', (-2)::INT),
+  ('www.apache.org', '', (1)::INT),
+  ('www.apache.org', '', (-1)::INT),
+  ('www.apache.org', '#', (2)::INT),
+  ('www||apache||org', '||', (2)::INT),
+  ('www||apache||org', '||', (-2)::INT),
+  ('大千世界大千世界', '千', (2)::INT),
+  ('||||||', '|||', (3)::INT),
+  ('||||||', '|||', (-4)::INT),
+  ('aaaaa', 'aa', (2)::INT),
+  ('aaaaa', 'aa', (-2)::INT),
+  ('abababa', 'aba', (2)::INT),
+  ('abababa', 'aba', (-2)::INT),
+  ('😀😀😀', '😀😀', (2)::INT),
+  ('😀😀😀', '😀😀', (-2)::INT),
+  ('.a', '.', (1)::INT),
+  ('a.', '.', (-1)::INT),
+  ('abc', 'abc', (1)::INT),
+  ('abc', 'abc', (-1)::INT),
+  ('ab', 'abcd', (1)::INT),
+  ('ab', 'abcd', (-1)::INT),
+  ('ABCabc', 'a', (1)::INT),
+  ('中文.测试.数据', '.', (-1)::INT),
+  ('中文.测试.数据', '.', (2)::INT),
+  ('a.b', '.', (2147483647)::INT),
+  ('a.b', '.', (-2147483647)::INT),
+  ('abc', '', (-2147483648)::INT),
+  ('abc', '', (0)::INT),
+  (NULL::STRING, '.', (-2147483648)::INT),
+  ('abc', NULL::STRING, (-2147483648)::INT),
+  ('abc', '.', NULL::INT),
+  (NULL::STRING, '', (0)::INT)) AS t(s, d, c);
+----
+www.apache.org
+www.apache
+www
+(empty)
+org
+apache.org
+www.apache.org
+www.apache.org
+www.apache.org
+(empty)
+(empty)
+(empty)
+(empty)
+www.apache.org
+www||apache
+apache||org
+大千世界大
+||
+|||
+a
+a
+ab
+ba
+😀
+😀
+(empty)
+(empty)
+(empty)
+(empty)
+ab
+ab
+ABC
+数据
+中文.测试
+a.b
+a.b
+(empty)
+(empty)
+NULL
+NULL
+NULL
+NULL
+
+query T
+SELECT substring_index('www.apache.org', '.', (3)::INT);
+----
+www.apache.org
+
+query T
+SELECT substring_index('www.apache.org', '.', (2)::INT);
+----
+www.apache
+
+query T
+SELECT substring_index('www.apache.org', '.', (1)::INT);
+----
+www
+
+query T
+SELECT substring_index('www.apache.org', '.', (0)::INT);
+----
+(empty)
+
+query T
+SELECT substring_index('www.apache.org', '.', (-1)::INT);
+----
+org
+
+query T
+SELECT substring_index('www.apache.org', '.', (-2)::INT);
+----
+apache.org
+
+query T
+SELECT substring_index('www.apache.org', '.', (-3)::INT);
+----
+www.apache.org
+
+query T
+SELECT substring_index('www.apache.org', '.', (10)::INT);
+----
+www.apache.org
+
+query T
+SELECT substring_index('www.apache.org', '.', (-10)::INT);
+----
+www.apache.org
+
+query T
+SELECT substring_index('', '.', (1)::INT);
+----
+(empty)
+
+query T
+SELECT substring_index('', '.', (-2)::INT);
+----
+(empty)
+
+query T
+SELECT substring_index('www.apache.org', '', (1)::INT);
+----
+(empty)
+
+query T
+SELECT substring_index('www.apache.org', '', (-1)::INT);
+----
+(empty)
+
+query T
+SELECT substring_index('www.apache.org', '#', (2)::INT);
+----
+www.apache.org
+
+query T
+SELECT substring_index('www||apache||org', '||', (2)::INT);
+----
+www||apache
+
+query T
+SELECT substring_index('www||apache||org', '||', (-2)::INT);
+----
+apache||org
+
+query T
+SELECT substring_index('大千世界大千世界', '千', (2)::INT);
+----
+大千世界大
+
+query T
+SELECT substring_index('||||||', '|||', (3)::INT);
+----
+||
+
+query T
+SELECT substring_index('||||||', '|||', (-4)::INT);
+----
+|||
+
+query T
+SELECT substring_index('aaaaa', 'aa', (2)::INT);
+----
+a
+
+query T
+SELECT substring_index('aaaaa', 'aa', (-2)::INT);
+----
+a
+
+query T
+SELECT substring_index('abababa', 'aba', (2)::INT);
+----
+ab
+
+query T
+SELECT substring_index('abababa', 'aba', (-2)::INT);
+----
+ba
+
+query T
+SELECT substring_index('😀😀😀', '😀😀', (2)::INT);
+----
+😀
+
+query T
+SELECT substring_index('😀😀😀', '😀😀', (-2)::INT);
+----
+😀
+
+query T
+SELECT substring_index('.a', '.', (1)::INT);
+----
+(empty)
+
+query T
+SELECT substring_index('a.', '.', (-1)::INT);
+----
+(empty)
+
+query T
+SELECT substring_index('abc', 'abc', (1)::INT);
+----
+(empty)
+
+query T
+SELECT substring_index('abc', 'abc', (-1)::INT);
+----
+(empty)
+
+query T
+SELECT substring_index('ab', 'abcd', (1)::INT);
+----
+ab
+
+query T
+SELECT substring_index('ab', 'abcd', (-1)::INT);
+----
+ab
+
+query T
+SELECT substring_index('ABCabc', 'a', (1)::INT);
+----
+ABC
+
+query T
+SELECT substring_index('中文.测试.数据', '.', (-1)::INT);
+----
+数据
+
+query T
+SELECT substring_index('中文.测试.数据', '.', (2)::INT);
+----
+中文.测试
+
+query T
+SELECT substring_index('a.b', '.', (2147483647)::INT);
+----
+a.b
+
+query T
+SELECT substring_index('a.b', '.', (-2147483647)::INT);
+----
+a.b
+
+query T
+SELECT substring_index('abc', '', (-2147483648)::INT);
+----
+(empty)
+
+query T
+SELECT substring_index('abc', '', (0)::INT);
+----
+(empty)
+
+query T
+SELECT substring_index(NULL::STRING, '.', (-2147483648)::INT);
+----
+NULL
+
+query T
+SELECT substring_index('abc', NULL::STRING, (-2147483648)::INT);
+----
+NULL
+
+query T
+SELECT substring_index('abc', '.', NULL::INT);
+----
+NULL
+
+query T
+SELECT substring_index(NULL::STRING, '', (0)::INT);
+----
+NULL
+
+# Column arguments mask 1: source=1, delimiter=2, count=4.
+query T
+SELECT substring_index(s, '.', (2)::INT) FROM (VALUES ('www.apache.org', '.', (2)::INT), ('||||||', '|||', (-4)::INT), (NULL::STRING, '.', (2)::INT), ('a.b', NULL::STRING, (0)::INT), ('a.b', '.', NULL::INT)) AS t(s,d,c);
+----
+www.apache
+||||||
+NULL
+a.b
+a.b
+
+# Column arguments mask 2: source=1, delimiter=2, count=4.
+query T
+SELECT substring_index('www.apache.org', d, (2)::INT) FROM (VALUES ('www.apache.org', '.', (2)::INT), ('||||||', '|||', (-4)::INT), (NULL::STRING, '.', (2)::INT), ('a.b', NULL::STRING, (0)::INT), ('a.b', '.', NULL::INT)) AS t(s,d,c);
+----
+www.apache
+www.apache.org
+www.apache
+NULL
+www.apache
+
+# Column arguments mask 3: source=1, delimiter=2, count=4.
+query T
+SELECT substring_index(s, d, (2)::INT) FROM (VALUES ('www.apache.org', '.', (2)::INT), ('||||||', '|||', (-4)::INT), (NULL::STRING, '.', (2)::INT), ('a.b', NULL::STRING, (0)::INT), ('a.b', '.', NULL::INT)) AS t(s,d,c);
+----
+www.apache
+|
+NULL
+NULL
+a.b
+
+# Column arguments mask 4: source=1, delimiter=2, count=4.
+query T
+SELECT substring_index('www.apache.org', '.', c) FROM (VALUES ('www.apache.org', '.', (2)::INT), ('||||||', '|||', (-4)::INT), (NULL::STRING, '.', (2)::INT), ('a.b', NULL::STRING, (0)::INT), ('a.b', '.', NULL::INT)) AS t(s,d,c);
+----
+www.apache
+www.apache.org
+www.apache
+(empty)
+NULL
+
+# Column arguments mask 5: source=1, delimiter=2, count=4.
+query T
+SELECT substring_index(s, '.', c) FROM (VALUES ('www.apache.org', '.', (2)::INT), ('||||||', '|||', (-4)::INT), (NULL::STRING, '.', (2)::INT), ('a.b', NULL::STRING, (0)::INT), ('a.b', '.', NULL::INT)) AS t(s,d,c);
+----
+www.apache
+||||||
+NULL
+(empty)
+NULL
+
+# Column arguments mask 6: source=1, delimiter=2, count=4.
+query T
+SELECT substring_index('www.apache.org', d, c) FROM (VALUES ('www.apache.org', '.', (2)::INT), ('||||||', '|||', (-4)::INT), (NULL::STRING, '.', (2)::INT), ('a.b', NULL::STRING, (0)::INT), ('a.b', '.', NULL::INT)) AS t(s,d,c);
+----
+www.apache
+www.apache.org
+www.apache
+NULL
+NULL
+
+# Column arguments mask 7: source=1, delimiter=2, count=4.
+query T
+SELECT substring_index(s, d, c) FROM (VALUES ('www.apache.org', '.', (2)::INT), ('||||||', '|||', (-4)::INT), (NULL::STRING, '.', (2)::INT), ('a.b', NULL::STRING, (0)::INT), ('a.b', '.', NULL::INT)) AS t(s,d,c);
+----
+www.apache
+|||
+NULL
+NULL
+NULL
+
+statement ok
+SET datafusion.execution.enable_ansi_mode = false;
+
+query error NegativeArraySizeException: -1
+SELECT substring_index('abc', '.', (-2147483648)::INT);
+
+query error NegativeArraySizeException: -1
+SELECT substring_index('', '.', (-2147483648)::INT);
+
+query error NegativeArraySizeException: -1
+SELECT substring_index(s, d, c) FROM (VALUES ('a.b', '.', 1::INT), ('abc', '.', (-2147483648)::INT)) AS t(s,d,c);
+
+query T
+SELECT substring_index(s, d, c) FROM (VALUES (NULL::STRING, '.', (-2147483648)::INT), ('abc', NULL::STRING, (-2147483648)::INT), ('abc', '', (-2147483648)::INT)) AS t(s,d,c);
+----
+NULL
+NULL
+(empty)
+
+query T
+SELECT substring_index('a.b.c', '.', '2');
+----
+a.b
+
+query T
+SELECT substring_index('a.b.c', '.', 2::BIGINT);
+----
+a.b
+
+query T
+SELECT substring_index(12321, 2, 2::INT);
+----
+123
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT substring_index('a.b.c', '.', true);
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT substring_index('abc', '.', make_array(1,2));
+
+statement ok
+SET datafusion.execution.enable_ansi_mode = true;
+
+query error NegativeArraySizeException: -1
+SELECT substring_index('abc', '.', (-2147483648)::INT);
+
+query error NegativeArraySizeException: -1
+SELECT substring_index('', '.', (-2147483648)::INT);
+
+query error NegativeArraySizeException: -1
+SELECT substring_index(s, d, c) FROM (VALUES ('a.b', '.', 1::INT), ('abc', '.', (-2147483648)::INT)) AS t(s,d,c);
+
+query T
+SELECT substring_index(s, d, c) FROM (VALUES (NULL::STRING, '.', (-2147483648)::INT), ('abc', NULL::STRING, (-2147483648)::INT), ('abc', '', (-2147483648)::INT)) AS t(s,d,c);
+----
+NULL
+NULL
+(empty)
+
+query T
+SELECT substring_index('a.b.c', '.', '2');
+----
+a.b
+
+query T
+SELECT substring_index('a.b.c', '.', 2::BIGINT);
+----
+a.b
+
+query T
+SELECT substring_index(12321, 2, 2::INT);
+----
+123
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT substring_index('a.b.c', '.', true);
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT substring_index('abc', '.', make_array(1,2));
+
+statement ok
+SET datafusion.execution.enable_ansi_mode = false;
+
+query T
+SELECT substring_index(arrow_cast(s, 'Utf8'), arrow_cast(d, 'Utf8'), c) FROM (VALUES ('||||||', '|||', 3::INT), ('😀😀😀', '😀😀', (-2)::INT), (NULL::STRING, '.', 1::INT)) AS t(s,d,c);
+----
+||
+😀
+NULL
+
+query T
+SELECT substring_index(arrow_cast(s, 'Utf8'), arrow_cast(d, 'LargeUtf8'), c) FROM (VALUES ('||||||', '|||', 3::INT), ('😀😀😀', '😀😀', (-2)::INT), (NULL::STRING, '.', 1::INT)) AS t(s,d,c);
+----
+||
+😀
+NULL
+
+query T
+SELECT substring_index(arrow_cast(s, 'Utf8'), arrow_cast(d, 'Utf8View'), c) FROM (VALUES ('||||||', '|||', 3::INT), ('😀😀😀', '😀😀', (-2)::INT), (NULL::STRING, '.', 1::INT)) AS t(s,d,c);
+----
+||
+😀
+NULL
+
+query T
+SELECT arrow_typeof(substring_index(arrow_cast('a.b', 'Utf8'), '.', 1::INT));
+----
+Utf8
+
+query T
+SELECT substring_index(arrow_cast(s, 'LargeUtf8'), arrow_cast(d, 'Utf8'), c) FROM (VALUES ('||||||', '|||', 3::INT), ('😀😀😀', '😀😀', (-2)::INT), (NULL::STRING, '.', 1::INT)) AS t(s,d,c);
+----
+||
+😀
+NULL
+
+query T
+SELECT substring_index(arrow_cast(s, 'LargeUtf8'), arrow_cast(d, 'LargeUtf8'), c) FROM (VALUES ('||||||', '|||', 3::INT), ('😀😀😀', '😀😀', (-2)::INT), (NULL::STRING, '.', 1::INT)) AS t(s,d,c);
+----
+||
+😀
+NULL
+
+query T
+SELECT substring_index(arrow_cast(s, 'LargeUtf8'), arrow_cast(d, 'Utf8View'), c) FROM (VALUES ('||||||', '|||', 3::INT), ('😀😀😀', '😀😀', (-2)::INT), (NULL::STRING, '.', 1::INT)) AS t(s,d,c);
+----
+||
+😀
+NULL
+
+query T
+SELECT arrow_typeof(substring_index(arrow_cast('a.b', 'LargeUtf8'), '.', 1::INT));
+----
+LargeUtf8
+
+query T
+SELECT substring_index(arrow_cast(s, 'Utf8View'), arrow_cast(d, 'Utf8'), c) FROM (VALUES ('||||||', '|||', 3::INT), ('😀😀😀', '😀😀', (-2)::INT), (NULL::STRING, '.', 1::INT)) AS t(s,d,c);
+----
+||
+😀
+NULL
+
+query T
+SELECT substring_index(arrow_cast(s, 'Utf8View'), arrow_cast(d, 'LargeUtf8'), c) FROM (VALUES ('||||||', '|||', 3::INT), ('😀😀😀', '😀😀', (-2)::INT), (NULL::STRING, '.', 1::INT)) AS t(s,d,c);
+----
+||
+😀
+NULL
+
+query T
+SELECT substring_index(arrow_cast(s, 'Utf8View'), arrow_cast(d, 'Utf8View'), c) FROM (VALUES ('||||||', '|||', 3::INT), ('😀😀😀', '😀😀', (-2)::INT), (NULL::STRING, '.', 1::INT)) AS t(s,d,c);
+----
+||
+😀
+NULL
+
+query T
+SELECT arrow_typeof(substring_index(arrow_cast('a.b', 'Utf8View'), '.', 1::INT));
+----
+Utf8View
+
+query T
+SELECT substring_index(arrow_cast(s, 'Dictionary(Int32, Utf8)'), arrow_cast(d, 'Dictionary(Int32, Utf8View)'), arrow_cast(c, 'Dictionary(Int32, Int32)')) FROM (VALUES ('||||||', '|||', 3::INT), ('www.apache.org', '.', (-2)::INT), (NULL::STRING, '.', 1::INT), ('a.b', NULL::STRING, 1::INT), ('a.b','.',NULL::INT)) AS t(s,d,c);
+----
+||
+apache.org
+NULL
+NULL
+NULL
+
+query error WRONG_NUM_ARGS
+SELECT substring_index('a', '.');
+
+query error WRONG_NUM_ARGS
+SELECT substring_index('a', '.', 1, 2);
+
+# xfail spark: implicit casts still use DataFusion CAST; legacy invalid/narrowing counts differ (https://github.com/apache/datafusion-spark/issues/88).
+query error
+SELECT substring_index('a.b.c', '.', 'bad');
+
+# xfail spark: implicit casts still use DataFusion CAST; legacy invalid/narrowing counts differ (https://github.com/apache/datafusion-spark/issues/88).
+query error
+SELECT substring_index('a.b.c', '.', '2.9');
+
+# xfail spark: implicit casts still use DataFusion CAST; legacy invalid/narrowing counts differ (https://github.com/apache/datafusion-spark/issues/88).
+query error
+SELECT substring_index('a.b.c', '.', 4294967297::BIGINT);
+
+
+# ANSI rejects these count casts in Spark too. Error formatting is part of #88.
+statement ok
+SET datafusion.execution.enable_ansi_mode = true;
+
+query error
+SELECT substring_index('a.b.c', '.', 'bad');
+
+query error
+SELECT substring_index('a.b.c', '.', '2.9');
+
+query error
+SELECT substring_index('a.b.c', '.', 4294967297::BIGINT);
+
+statement ok
+SET datafusion.execution.enable_ansi_mode = false;
