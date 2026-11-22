@@ -1135,6 +1135,7 @@ mod tests {
     };
     use datafusion_common::cast::as_string_array;
     use datafusion_common::config::ConfigOptions;
+    use datafusion_expr::ReturnFieldArgs;
 
     /// Runs to_json over input (whose type is described by `field`) and
     /// returns the resulting string array.
@@ -1178,6 +1179,28 @@ mod tests {
     /// Parses a `map(...)` literal of options.
     fn parse_options(options: &[(&str, Option<&str>)]) -> Result<ToJsonOptions> {
         ToJsonOptions::try_new(Some(&options_scalar(options)))
+    }
+
+    /// The constant that a `map(...)` literal of options is planned as.
+    fn options_literal(options: &[(&str, Option<&str>)]) -> ScalarValue {
+        let ColumnarValue::Scalar(scalar) = options_scalar(options) else {
+            unreachable!("options_scalar returns a scalar")
+        };
+        scalar
+    }
+
+    /// Plans `to_json(array, options)` the way DataFusion does before any row
+    /// is read. `options` is the value of the second argument when it is a
+    /// constant, and `None` when it is not.
+    fn plan_with_options(options: Option<&ScalarValue>) -> Result<FieldRef> {
+        let item = Arc::new(Field::new("item", DataType::Int32, true));
+        let input: FieldRef = Arc::new(Field::new("a", DataType::List(item), true));
+        let options_type = options_scalar(&[]).data_type();
+        let options_field: FieldRef = Arc::new(Field::new("o", options_type, false));
+        SparkToJson::new().return_field_from_args(ReturnFieldArgs {
+            arg_fields: &[input, options_field],
+            scalar_arguments: &[None, options],
+        })
     }
 
     /// Like `run`, with a `map(...)` literal of options as the second argument.
@@ -1560,6 +1583,44 @@ mod tests {
         let null_map = ColumnarValue::Scalar(ScalarValue::Map(Arc::new(mb.finish())));
         let err = ToJsonOptions::try_new(Some(&null_map)).unwrap_err();
         assert!(err.to_string().contains("must not be NULL"), "{err}");
+    }
+
+    #[test]
+    fn test_constant_options_are_checked_at_planning() {
+        // `to_json(array(1), map('pretty', 'true'))` has to fail when it is
+        // planned, whether or not there is a row to serialize
+        let options = options_literal(&[("pretty", Some("true"))]);
+        let err = plan_with_options(Some(&options)).unwrap_err();
+        assert!(err.to_string().contains("option 'pretty'"), "{err}");
+
+        // the same for a value that is not valid
+        let options = options_literal(&[("ignoreNullFields", Some("maybe"))]);
+        let err = plan_with_options(Some(&options)).unwrap_err();
+        assert!(err.to_string().contains("must be true or false"), "{err}");
+    }
+
+    #[test]
+    fn test_planning_accepts_valid_and_non_constant_options() {
+        // a valid constant
+        let options = options_literal(&[("ignoreNullFields", Some("false"))]);
+        let field = plan_with_options(Some(&options)).unwrap();
+        assert_eq!(field.data_type(), &DataType::Utf8);
+
+        // an options argument that is not a constant is left to execution
+        let field = plan_with_options(None).unwrap();
+        assert_eq!(field.data_type(), &DataType::Utf8);
+    }
+
+    #[test]
+    fn test_unsupported_option_fails_at_execution() {
+        // the check made when rows are serialized: it is what reports a bad
+        // option today, and it stays for options that are not constants
+        let input = sample_list();
+        let field = field_of(&input);
+        let input = ColumnarValue::Array(Arc::new(input));
+        let options = [("pretty", Some("true"))];
+        let err = run_with_options(input, field, &options).unwrap_err();
+        assert!(err.to_string().contains("option 'pretty'"), "{err}");
     }
 
     #[test]
