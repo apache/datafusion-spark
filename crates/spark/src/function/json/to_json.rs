@@ -1122,9 +1122,10 @@ mod tests {
         Date64Array, Decimal32Array, Decimal128Array, Decimal256Array, DictionaryArray,
         FixedSizeBinaryArray, FixedSizeListArray, Float32Array, Float64Array,
         Float64Builder, Int32Array, Int32Builder, Int64Array, LargeBinaryArray,
-        LargeListArray, LargeStringArray, ListArray, ListBuilder, MapBuilder,
-        StringArray, StringViewArray, StructArray, TimestampMicrosecondArray,
-        TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
+        LargeListArray, LargeListViewArray, LargeStringArray, ListArray, ListBuilder,
+        ListViewArray, MapBuilder, StringArray, StringViewArray, StructArray,
+        TimestampMicrosecondArray, TimestampNanosecondArray, TimestampSecondArray,
+        UInt8Array,
     };
     use arrow::buffer::NullBuffer;
     use arrow::datatypes::{
@@ -1840,8 +1841,8 @@ mod tests {
     }
 
     #[test]
-    fn test_large_and_fixed_size_list_input() {
-        // the same rows as two other Arrow list types
+    fn test_other_list_types_input() {
+        // the same rows as each of the other Arrow list types
         let rows = vec![
             Some(vec![Some(1), None]),
             None,
@@ -1849,9 +1850,18 @@ mod tests {
             Some(vec![Some(5), Some(6)]),
         ];
         let large = LargeListArray::from_iter_primitive::<Int32Type, _, _>(rows.clone());
-        let fixed = FixedSizeListArray::from_iter_primitive::<Int32Type, _, _>(rows, 2);
+        let fixed =
+            FixedSizeListArray::from_iter_primitive::<Int32Type, _, _>(rows.clone(), 2);
+        let view = ListViewArray::from_iter_primitive::<Int32Type, _, _>(rows.clone());
+        let large_view = LargeListViewArray::from_iter_primitive::<Int32Type, _, _>(rows);
 
-        for input in [Arc::new(large) as ArrayRef, Arc::new(fixed) as ArrayRef] {
+        let inputs: [ArrayRef; 4] = [
+            Arc::new(large),
+            Arc::new(fixed),
+            Arc::new(view),
+            Arc::new(large_view),
+        ];
+        for input in inputs {
             let field = field_of(&input);
             let out = run(ColumnarValue::Array(input), field).unwrap();
             let out = as_string_array(&out).unwrap();
@@ -1862,6 +1872,29 @@ mod tests {
             assert_eq!(out.value(2), "[3,4]");
             assert_eq!(out.value(3), "[5,6]");
         }
+    }
+
+    #[test]
+    fn test_list_view_elements_use_spark_encoders() {
+        // a float shows that Spark's formatting reaches the elements: arrow's
+        // own encoder writes 0.00001
+        let rows = vec![Some(vec![Some(1e-5), None]), Some(vec![Some(1.0)])];
+        let view = ListViewArray::from_iter_primitive::<Float64Type, _, _>(rows);
+        let field = field_of(&view);
+        let sliced = view.slice(1, 1);
+
+        let input = ColumnarValue::Array(Arc::new(view));
+        let out = run(input, Arc::clone(&field)).unwrap();
+        let out = as_string_array(&out).unwrap();
+        assert_eq!(out.value(0), "[1.0E-5,null]");
+        assert_eq!(out.value(1), "[1.0]");
+
+        // through a non-zero offset as well
+        let input = ColumnarValue::Array(Arc::new(sliced));
+        let out = run(input, field).unwrap();
+        let out = as_string_array(&out).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.value(0), "[1.0]");
     }
 
     #[test]

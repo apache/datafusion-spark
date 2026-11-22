@@ -532,6 +532,16 @@ SELECT to_json(arrow_cast(array(1::INT, 2::INT), 'FixedSizeList(2, Int32)'));
 ----
 [1,2]
 
+query T
+SELECT to_json(arrow_cast(array(1::INT, NULL, 3::INT), 'ListView(Int32)'));
+----
+[1,null,3]
+
+query T
+SELECT to_json(arrow_cast(array(1::INT, 2::INT), 'LargeListView(Int32)'));
+----
+[1,2]
+
 # column input
 query T rowsort
 SELECT to_json(array(a, b))
