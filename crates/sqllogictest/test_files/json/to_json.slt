@@ -626,6 +626,16 @@ SELECT to_json(named_struct('a', 1::INT), map('ignoreNullFields', false));
 query error to_json: the ignoreNullFields option must be true or false, got 'maybe'
 SELECT to_json(named_struct('a', 1::INT), map('ignoreNullFields', 'maybe'));
 
+# A NULL option value is read as the string "null", as Spark does, and "null"
+# is not a boolean. Spark 4.2.0 fails here with `For input string: "null"`.
+query error to_json: the ignoreNullFields option must be true or false, got 'null'
+SELECT to_json(named_struct('a', 1::INT), map('ignoreNullFields', CAST(NULL AS STRING)));
+
+# An untyped NULL value makes the options a map of non-strings. Spark 4.2.0
+# fails here with INVALID_OPTIONS.NON_STRING_TYPE (MAP<STRING, VOID>).
+query error Error during planning: to_json: the options argument must be a map of strings, got
+SELECT to_json(named_struct('a', 1::INT), map('ignoreNullFields', NULL));
+
 # an option that is not supported is an error rather than ignored
 # xfail spark: intended: the pretty option is not supported yet (https://github.com/apache/datafusion-spark/issues/338)
 query error to_json: unsupported option 'pretty', supported options: ignoreNullFields

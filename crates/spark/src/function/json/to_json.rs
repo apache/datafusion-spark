@@ -243,7 +243,9 @@ impl ToJsonOptions {
         let values = cast(entries.column(1), &DataType::Utf8)?;
         let (keys, values) = (keys.as_string::<i32>(), values.as_string::<i32>());
         for i in 0..keys.len() {
-            // Spark turns a NULL value into the string "null"
+            // Spark reads a NULL value as the string "null". The NULL option
+            // records in json/to_json.slt cover this, checked against Spark
+            // 4.2.0.
             let value = if values.is_null(i) {
                 "null"
             } else {
