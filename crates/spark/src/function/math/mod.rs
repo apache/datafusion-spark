@@ -12,10 +12,12 @@ pub mod ceil;
 pub mod divide;
 pub mod expm1;
 pub mod factorial;
+mod fdlibm;
 pub mod floor;
 pub mod greatest_least;
 pub mod hex;
 pub mod hypot;
+pub mod log;
 pub mod modulus;
 pub mod negative;
 pub mod positive;
@@ -40,6 +42,11 @@ make_udf_function!(greatest_least::SparkGreatest, greatest);
 make_udf_function!(greatest_least::SparkLeast, least);
 make_udf_function!(hex::SparkHex, hex);
 make_udf_function!(hypot::SparkHypot, hypot);
+make_udf_function!(log::SparkLn, ln);
+make_udf_function!(log::SparkLog, log);
+make_udf_function!(log::SparkLog10, log10);
+make_udf_function!(log::SparkLog1p, log1p);
+make_udf_function!(log::SparkLog2, log2);
 make_udf_function!(modulus::SparkMod, modulus);
 make_udf_function!(modulus::SparkPmod, pmod);
 make_udf_function!(positive::SparkPositive, positive);
@@ -80,6 +87,27 @@ pub mod expr_fn {
     ));
     export_functions!((hex, "Computes hex value of the given column.", arg1));
     export_functions!((hypot, "Returns sqrt(a^2 + b^2) without intermediate overflow or underflow.", arg1 arg2));
+    export_functions!((
+        ln,
+        "Returns the natural logarithm of expr, or NULL if expr <= 0.",
+        arg1
+    ));
+    export_functions!((
+        log,
+        "Returns the logarithm of expr in the given base (default e), or NULL if either argument <= 0.",
+        args
+    ));
+    export_functions!((
+        log10,
+        "Returns the base 10 logarithm of expr, or NULL if expr <= 0.",
+        arg1
+    ));
+    export_functions!((log1p, "Returns ln(1 + expr), or NULL if expr <= -1.", arg1));
+    export_functions!((
+        log2,
+        "Returns the base 2 logarithm of expr, or NULL if expr <= 0.",
+        arg1
+    ));
     export_functions!((modulus, "Returns the remainder of division of the first argument by the second argument.", arg1 arg2));
     export_functions!((pmod, "Returns the positive remainder of division of the first argument by the second argument.", arg1 arg2));
     export_functions!((
@@ -131,6 +159,11 @@ pub fn functions() -> Vec<Arc<ScalarUDF>> {
         least(),
         hex(),
         hypot(),
+        ln(),
+        log(),
+        log10(),
+        log1p(),
+        log2(),
         modulus(),
         pmod(),
         pow(),
