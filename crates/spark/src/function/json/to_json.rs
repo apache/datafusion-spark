@@ -14,8 +14,8 @@ use arrow::buffer::OffsetBuffer;
 use arrow::compute::cast;
 use arrow::datatypes::{
     ArrowPrimitiveType, ArrowTimestampType, DataType, Date32Type, Date64Type,
-    Decimal32Type, Decimal64Type, Decimal128Type, Decimal256Type, DecimalType, FieldRef,
-    Float32Type, Float64Type, TimeUnit, TimestampMicrosecondType,
+    Decimal32Type, Decimal64Type, Decimal128Type, Decimal256Type, DecimalType, Field,
+    FieldRef, Float32Type, Float64Type, TimeUnit, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
 };
 use arrow::error::ArrowError;
@@ -33,8 +33,8 @@ use datafusion_common::{
     Result, ScalarValue, exec_datafusion_err, internal_err, plan_err,
 };
 use datafusion_expr::{
-    ColumnarValue, Documentation, ScalarFunctionArgs, ScalarUDFImpl, Signature,
-    TypeSignature, Volatility,
+    ColumnarValue, Documentation, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl,
+    Signature, TypeSignature, Volatility,
 };
 use datafusion_macros::user_doc;
 
@@ -139,6 +139,25 @@ impl ScalarUDFImpl for SparkToJson {
         Ok(DataType::Utf8)
     }
 
+    fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
+        let arg_types: Vec<DataType> = args
+            .arg_fields
+            .iter()
+            .map(|f| f.data_type().clone())
+            .collect();
+        let return_type = self.return_type(&arg_types)?;
+
+        // A constant options map is checked while the query is planned, so that
+        // a bad option is an error whether or not there are rows to serialize.
+        // An options argument that is not a constant yet is checked in
+        // `invoke_with_args`.
+        if let Some(Some(options)) = args.scalar_arguments.get(1) {
+            ToJsonOptions::try_from_scalar(options)?;
+        }
+
+        Ok(Arc::new(Field::new(self.name(), return_type, true)))
+    }
+
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         let ScalarFunctionArgs {
             args,
@@ -221,14 +240,24 @@ impl Default for ToJsonOptions {
 }
 
 impl ToJsonOptions {
-    /// Reads the options argument, if there is one. Spark only takes a
-    /// `map(...)` call of strings there, so the argument has to be a constant.
+    /// Reads the options argument when the function runs, if there is one.
+    /// Spark only takes a `map(...)` call of strings there, so the argument
+    /// has to be a constant.
     fn try_new(options: Option<&ColumnarValue>) -> Result<Self> {
-        let mut parsed = Self::default();
-        let Some(options) = options else {
-            return Ok(parsed);
-        };
-        let ColumnarValue::Scalar(ScalarValue::Map(map)) = options else {
+        match options {
+            None => Ok(Self::default()),
+            Some(ColumnarValue::Scalar(scalar)) => Self::try_from_scalar(scalar),
+            Some(ColumnarValue::Array(_)) => plan_err!(
+                "to_json: the options argument must be a constant map of strings"
+            ),
+        }
+    }
+
+    /// Reads a constant options map. `return_field_from_args` calls it while
+    /// the query is planned, when the argument is a constant by then, and
+    /// `try_new` calls it when the function runs.
+    fn try_from_scalar(options: &ScalarValue) -> Result<Self> {
+        let ScalarValue::Map(map) = options else {
             return plan_err!(
                 "to_json: the options argument must be a constant map of strings"
             );
@@ -238,6 +267,7 @@ impl ToJsonOptions {
             return plan_err!("to_json: the options argument must not be NULL");
         }
 
+        let mut parsed = Self::default();
         let entries = map.value(0);
         let keys = cast(entries.column(0), &DataType::Utf8)?;
         let values = cast(entries.column(1), &DataType::Utf8)?;
@@ -1135,7 +1165,6 @@ mod tests {
     };
     use datafusion_common::cast::as_string_array;
     use datafusion_common::config::ConfigOptions;
-    use datafusion_expr::ReturnFieldArgs;
 
     /// Runs to_json over input (whose type is described by `field`) and
     /// returns the resulting string array.
