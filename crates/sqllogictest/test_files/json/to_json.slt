@@ -607,6 +607,12 @@ FROM (VALUES (1::INT, 'a'::STRING), (2::INT, NULL::STRING)) AS t(id, name);
 {"id":1,"name":"a"}
 {"id":2,"name":null}
 
+# valid options and no row to serialize: no error and no result
+query T
+SELECT to_json(named_struct('a', x), map('ignoreNullFields', 'false'))
+FROM (VALUES (1::INT)) AS t(x) WHERE x > 1;
+----
+
 ## Errors
 
 query error Error during planning: to_json expects a struct, map or array argument, got Utf8
@@ -644,6 +650,21 @@ SELECT to_json(named_struct('a', 1::INT), map('pretty', 'true'));
 # xfail spark: intended: to_json rejects every option it does not support, Spark ignores the names it does not know
 query error to_json: unsupported option 'noSuchOption', supported options: ignoreNullFields
 SELECT to_json(named_struct('a', 1::INT), map('noSuchOption', 'x'));
+
+# Constant options are checked at planning, so a bad option is an error even with no rows.
+# Without constant folding the options are not a literal yet, so this is skipped in evaluate mode.
+# xfail spark: intended: the pretty option is not supported yet
+skipif evaluate
+query error to_json: unsupported option 'pretty', supported options: ignoreNullFields
+SELECT to_json(named_struct('a', x), map('pretty', 'true'))
+FROM (VALUES (1::INT)) AS t(x) WHERE x > 1;
+
+# The same for a value that is not valid.
+# xfail spark: intended: to_json checks constant options at planning, Spark when a row is serialized
+skipif evaluate
+query error to_json: the ignoreNullFields option must be true or false, got 'maybe'
+SELECT to_json(named_struct('a', x), map('ignoreNullFields', 'maybe'))
+FROM (VALUES (1::INT)) AS t(x) WHERE x > 1;
 
 # at most two arguments
 query error to_json
