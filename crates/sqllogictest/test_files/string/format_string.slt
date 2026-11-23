@@ -1674,6 +1674,11 @@ SELECT format_string('String: %S', arrow_cast(3.14159, 'Float64'));
 ----
 String: 3.14159
 
+query T
+SELECT format_string('Compact: %g', CAST(500 AS DOUBLE));
+----
+Compact: 500.000
+
 ## Decimal128 with various formats
 # xfail spark: Spark errors for %f/%e/%g/%a of a DECIMAL (https://github.com/apache/datafusion-spark/issues/95)
 query T
