@@ -666,6 +666,11 @@ query error to_json: the ignoreNullFields option must be true or false, got 'may
 SELECT to_json(named_struct('a', x), map('ignoreNullFields', 'maybe'))
 FROM (VALUES (1::INT)) AS t(x) WHERE x > 1;
 
+# options that are not a constant are rejected when the function runs
+query error to_json: the options argument must be a constant map of strings
+SELECT to_json(named_struct('a', x), map_from_arrays(array(k), array(v)))
+FROM (VALUES (1::INT, 'ignoreNullFields'::STRING, 'false'::STRING)) AS t(x, k, v);
+
 # at most two arguments
 query error to_json
 SELECT to_json(named_struct('a', 1::INT), map('a', 'b'), map('c', 'd'));
