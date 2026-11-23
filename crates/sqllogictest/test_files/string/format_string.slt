@@ -147,7 +147,7 @@ Scientific: 1.234500E+03
 query T
 SELECT format_string('Compact: %g', 1234.5);
 ----
-Compact: 1234.5
+Compact: 1234.50
 
 query T
 SELECT format_string('Compact: %g', CAST(123456789.1 AS DOUBLE));
@@ -159,12 +159,33 @@ Compact: 1.23457e+08
 query T
 SELECT format_string('Compact: %G', 1234.5);
 ----
-Compact: 1234.5
+Compact: 1234.50
 
 query T
 SELECT format_string('Compact: %G', CAST(123456789.1 AS DOUBLE));
 ----
 Compact: 1.23457E+08
+
+## Compact float keeps trailing zeros
+query T
+SELECT format_string('%g', CAST(500 AS DOUBLE));
+----
+500.000
+
+query T
+SELECT format_string('%g', CAST(1234.5 AS DOUBLE));
+----
+1234.50
+
+query T
+SELECT format_string('%G', CAST(0.0001 AS DOUBLE));
+----
+0.000100000
+
+query T
+SELECT format_string('%.3g', CAST(1234.5 AS DOUBLE));
+----
+1.23e+03
 
 ## Float with width and precision
 # xfail spark: Spark types the literal as DECIMAL, and %f/%e/%g/%a of a DECIMAL errors (https://github.com/apache/datafusion-spark/issues/97)
@@ -1621,11 +1642,10 @@ SELECT format_string('Scientific: %e', arrow_cast(1234.5, 'Float32'));
 ----
 Scientific: 1.234500e+03
 
-# xfail spark: %g strips trailing zeros, Java keeps six significant digits (https://github.com/apache/datafusion-spark/issues/39)
 query T
 SELECT format_string('Compact: %g', arrow_cast(1234.5, 'Float32'));
 ----
-Compact: 1234.5
+Compact: 1234.50
 
 query T
 SELECT format_string('String: %s', arrow_cast(3.14159, 'Float32'));
@@ -1677,13 +1697,13 @@ Scientific: 1.234500E+03
 query T
 SELECT format_string('Compact: %g', arrow_cast(1234.5, 'Decimal128(10, 2)'));
 ----
-Compact: 1234.5
+Compact: 1234.50
 
 # xfail spark: Spark errors for %f/%e/%g/%a of a DECIMAL (https://github.com/apache/datafusion-spark/issues/95)
 query T
 SELECT format_string('Compact: %G', arrow_cast(1234.5, 'Decimal128(10, 2)'));
 ----
-Compact: 1234.5
+Compact: 1234.50
 
 # xfail spark: %s of a DECIMAL prints the unscaled value, Spark prints it with its scale (https://github.com/apache/datafusion-spark/issues/39)
 query T
@@ -1714,7 +1734,7 @@ Scientific: 1.234500e+03
 query T
 SELECT format_string('Compact: %g', arrow_cast(1234.5, 'Decimal256(20, 2)'));
 ----
-Compact: 1234.5
+Compact: 1234.50
 
 # xfail spark: %s of a DECIMAL prints the unscaled value, Spark prints it with its scale (https://github.com/apache/datafusion-spark/issues/39)
 query T
