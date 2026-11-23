@@ -8,7 +8,441 @@
 # For more information, please see:
 #   https://github.com/apache/datafusion/issues/15914
 
-## Original Query: SELECT lcase('SparkSql');
-## PySpark 3.5.5 Result: {'lcase(SparkSql)': 'sparksql', 'typeof(lcase(SparkSql))': 'string', 'typeof(SparkSql)': 'string'}
-#query
-#SELECT lcase('SparkSql'::string);
+# Expected results verified against Spark 4.2.0 with default ICU case mappings.
+
+query T
+SELECT lcase('SparkSql');
+----
+sparksql
+
+query T
+SELECT lcase('Σ');
+----
+σ
+
+query T
+SELECT lcase('ΘΑΛΑΣΣΙΝΟΣ');
+----
+θαλασσινος
+
+query T
+SELECT lcase('İ');
+----
+i̇
+
+query T
+SELECT lcase('𐐅');
+----
+𐐭
+
+query T
+SELECT lcase('');
+----
+(empty)
+
+query T
+SELECT lcase(NULL::STRING);
+----
+NULL
+
+query T
+SELECT lcase(arrow_cast(s, 'Utf8')) FROM (VALUES
+  ('SparkSql'),
+  ('ÄBĆΔE'),
+  ('ΣΑΛΑΤΑ'),
+  ('ΘΑΛΑΣΣΙΝΟΣ'),
+  ('Σ'),
+  ('ΣΑΣ X'),
+  ('ΣΑΣ!'),
+  ('ΑΣ́'),
+  ('ΑΣ́Α'),
+  ('ΑΣ’'),
+  ('ΑΣ’Α'),
+  ('I'),
+  ('İ'),
+  ('FIDELİO'),
+  ('Iİ'),
+  ('ß ﬁ ﬃ ﬀ ﬆ ῗ'),
+  ('𐐅'),
+  ('𝔸'),
+  ('a🙃B🙃c'),
+  ('ςαλατα'),
+  ('θαλασσινοσ'),
+  ('ASCII ONLY 123'),
+  ('123!?'),
+  (''),
+  (NULL::STRING),
+  ('AAAAAAAAAAİ'),
+  ('İİİİİİ'),
+  ('HELLO WORLD LONG ASCII'),
+  ('ΣΣ'),
+  ('́Σ')) AS t(s);
+----
+sparksql
+äbćδe
+σαλατα
+θαλασσινος
+σ
+σας x
+σας!
+ας́
+ασ́α
+ας’
+ασ’α
+i
+i̇
+fideli̇o
+ii̇
+ß ﬁ ﬃ ﬀ ﬆ ῗ
+𐐭
+𝔸
+a🙃b🙃c
+ςαλατα
+θαλασσινοσ
+ascii only 123
+123!?
+(empty)
+NULL
+aaaaaaaaaai̇
+i̇i̇i̇i̇i̇i̇
+hello world long ascii
+σς
+́σ
+
+query T
+SELECT arrow_typeof(lcase(arrow_cast('İ', 'Utf8')));
+----
+Utf8
+
+query T
+SELECT lcase(arrow_cast(s, 'Dictionary(Int32, Utf8)')) FROM (VALUES ('ΘΑΛΑΣΣΙΝΟΣ'), ('İ'), (NULL::STRING), ('')) AS t(s);
+----
+θαλασσινος
+i̇
+NULL
+(empty)
+
+query T
+SELECT lcase(arrow_cast(s, 'LargeUtf8')) FROM (VALUES
+  ('SparkSql'),
+  ('ÄBĆΔE'),
+  ('ΣΑΛΑΤΑ'),
+  ('ΘΑΛΑΣΣΙΝΟΣ'),
+  ('Σ'),
+  ('ΣΑΣ X'),
+  ('ΣΑΣ!'),
+  ('ΑΣ́'),
+  ('ΑΣ́Α'),
+  ('ΑΣ’'),
+  ('ΑΣ’Α'),
+  ('I'),
+  ('İ'),
+  ('FIDELİO'),
+  ('Iİ'),
+  ('ß ﬁ ﬃ ﬀ ﬆ ῗ'),
+  ('𐐅'),
+  ('𝔸'),
+  ('a🙃B🙃c'),
+  ('ςαλατα'),
+  ('θαλασσινοσ'),
+  ('ASCII ONLY 123'),
+  ('123!?'),
+  (''),
+  (NULL::STRING),
+  ('AAAAAAAAAAİ'),
+  ('İİİİİİ'),
+  ('HELLO WORLD LONG ASCII'),
+  ('ΣΣ'),
+  ('́Σ')) AS t(s);
+----
+sparksql
+äbćδe
+σαλατα
+θαλασσινος
+σ
+σας x
+σας!
+ας́
+ασ́α
+ας’
+ασ’α
+i
+i̇
+fideli̇o
+ii̇
+ß ﬁ ﬃ ﬀ ﬆ ῗ
+𐐭
+𝔸
+a🙃b🙃c
+ςαλατα
+θαλασσινοσ
+ascii only 123
+123!?
+(empty)
+NULL
+aaaaaaaaaai̇
+i̇i̇i̇i̇i̇i̇
+hello world long ascii
+σς
+́σ
+
+query T
+SELECT arrow_typeof(lcase(arrow_cast('İ', 'LargeUtf8')));
+----
+LargeUtf8
+
+query T
+SELECT lcase(arrow_cast(s, 'Dictionary(Int32, LargeUtf8)')) FROM (VALUES ('ΘΑΛΑΣΣΙΝΟΣ'), ('İ'), (NULL::STRING), ('')) AS t(s);
+----
+θαλασσινος
+i̇
+NULL
+(empty)
+
+query T
+SELECT lcase(arrow_cast(s, 'Utf8View')) FROM (VALUES
+  ('SparkSql'),
+  ('ÄBĆΔE'),
+  ('ΣΑΛΑΤΑ'),
+  ('ΘΑΛΑΣΣΙΝΟΣ'),
+  ('Σ'),
+  ('ΣΑΣ X'),
+  ('ΣΑΣ!'),
+  ('ΑΣ́'),
+  ('ΑΣ́Α'),
+  ('ΑΣ’'),
+  ('ΑΣ’Α'),
+  ('I'),
+  ('İ'),
+  ('FIDELİO'),
+  ('Iİ'),
+  ('ß ﬁ ﬃ ﬀ ﬆ ῗ'),
+  ('𐐅'),
+  ('𝔸'),
+  ('a🙃B🙃c'),
+  ('ςαλατα'),
+  ('θαλασσινοσ'),
+  ('ASCII ONLY 123'),
+  ('123!?'),
+  (''),
+  (NULL::STRING),
+  ('AAAAAAAAAAİ'),
+  ('İİİİİİ'),
+  ('HELLO WORLD LONG ASCII'),
+  ('ΣΣ'),
+  ('́Σ')) AS t(s);
+----
+sparksql
+äbćδe
+σαλατα
+θαλασσινος
+σ
+σας x
+σας!
+ας́
+ασ́α
+ας’
+ασ’α
+i
+i̇
+fideli̇o
+ii̇
+ß ﬁ ﬃ ﬀ ﬆ ῗ
+𐐭
+𝔸
+a🙃b🙃c
+ςαλατα
+θαλασσινοσ
+ascii only 123
+123!?
+(empty)
+NULL
+aaaaaaaaaai̇
+i̇i̇i̇i̇i̇i̇
+hello world long ascii
+σς
+́σ
+
+query T
+SELECT arrow_typeof(lcase(arrow_cast('İ', 'Utf8View')));
+----
+Utf8View
+
+query T
+SELECT lcase(arrow_cast(s, 'Dictionary(Int32, Utf8View)')) FROM (VALUES ('ΘΑΛΑΣΣΙΝΟΣ'), ('İ'), (NULL::STRING), ('')) AS t(s);
+----
+θαλασσινος
+i̇
+NULL
+(empty)
+
+# Unicode mapping and replacement do not depend on ANSI mode.
+statement ok
+SET datafusion.execution.enable_ansi_mode = false;
+
+query T
+SELECT lcase(s) FROM (VALUES ('Iİ'), ('ΘΑΛΑΣΣΙΝΟΣ'), ('𐐅'), (NULL::STRING), ('')) AS t(s);
+----
+ii̇
+θαλασσινος
+𐐭
+NULL
+(empty)
+
+query T
+SELECT lcase(b) FROM (VALUES (X'535041524B'), (X'41FF42'), (X'EDA0BDEDB2A9'), (X'C0AF'), (X'F0808080'), (X'F0908041'), (X'E282'), (X'C4B0'), (X'F0909085'), (X''), (NULL::BINARY)) AS t(b);
+----
+spark
+a�b
+������
+��
+����
+�a
+�
+i̇
+𐐭
+(empty)
+NULL
+
+query T
+SELECT lcase(123::INT);
+----
+123
+
+query T
+SELECT lcase((-123)::BIGINT);
+----
+-123
+
+query T
+SELECT lcase(1.25::DOUBLE);
+----
+1.25
+
+query T
+SELECT lcase('1.25'::DECIMAL(3,2));
+----
+1.25
+
+query T
+SELECT lcase(true);
+----
+true
+
+query T
+SELECT lcase(DATE '2020-02-29');
+----
+2020-02-29
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT lcase([1,2]);
+
+# Unicode mapping and replacement do not depend on ANSI mode.
+statement ok
+SET datafusion.execution.enable_ansi_mode = true;
+
+query T
+SELECT lcase(s) FROM (VALUES ('Iİ'), ('ΘΑΛΑΣΣΙΝΟΣ'), ('𐐅'), (NULL::STRING), ('')) AS t(s);
+----
+ii̇
+θαλασσινος
+𐐭
+NULL
+(empty)
+
+query T
+SELECT lcase(b) FROM (VALUES (X'535041524B'), (X'41FF42'), (X'EDA0BDEDB2A9'), (X'C0AF'), (X'F0808080'), (X'F0908041'), (X'E282'), (X'C4B0'), (X'F0909085'), (X''), (NULL::BINARY)) AS t(b);
+----
+spark
+a�b
+������
+��
+����
+�a
+�
+i̇
+𐐭
+(empty)
+NULL
+
+query T
+SELECT lcase(123::INT);
+----
+123
+
+query T
+SELECT lcase((-123)::BIGINT);
+----
+-123
+
+query T
+SELECT lcase(1.25::DOUBLE);
+----
+1.25
+
+query T
+SELECT lcase('1.25'::DECIMAL(3,2));
+----
+1.25
+
+query T
+SELECT lcase(true);
+----
+true
+
+query T
+SELECT lcase(DATE '2020-02-29');
+----
+2020-02-29
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT lcase([1,2]);
+
+statement ok
+SET datafusion.execution.enable_ansi_mode = false;
+
+query T
+SELECT lcase(arrow_cast(b, 'Binary')) FROM (VALUES (X'41FF42'), (X'C4B049'), (NULL::BINARY)) AS t(b);
+----
+a�b
+i̇i
+NULL
+
+query T
+SELECT lcase(arrow_cast(b, 'LargeBinary')) FROM (VALUES (X'41FF42'), (X'C4B049'), (NULL::BINARY)) AS t(b);
+----
+a�b
+i̇i
+NULL
+
+query T
+SELECT lcase(arrow_cast(b, 'BinaryView')) FROM (VALUES (X'41FF42'), (X'C4B049'), (NULL::BINARY)) AS t(b);
+----
+a�b
+i̇i
+NULL
+
+query T
+SELECT lcase(arrow_cast(b, 'FixedSizeBinary(3)')) FROM (VALUES (X'41FF42'), (X'C4B049'), (NULL::BINARY)) AS t(b);
+----
+a�b
+i̇i
+NULL
+
+query T
+SELECT lcase(arrow_cast(b, 'Dictionary(Int32, Binary)')) FROM (VALUES (X'41FF42'), (NULL::BINARY), (X'C4B0')) AS t(b);
+----
+a�b
+NULL
+i̇
+
+query T
+SELECT lcase(X'41FF42');
+----
+a�b
+
+query error WRONG_NUM_ARGS
+SELECT lcase();
+
+query error WRONG_NUM_ARGS
+SELECT lcase('A', 'B');

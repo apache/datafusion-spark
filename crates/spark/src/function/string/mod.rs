@@ -18,6 +18,7 @@ pub mod ilike;
 pub mod is_valid_utf8;
 pub mod length;
 pub mod like;
+pub mod lower;
 pub mod luhn_check;
 pub mod make_valid_utf8;
 pub mod quote;
@@ -42,6 +43,7 @@ make_udf_function!(elt::SparkElt, elt);
 make_udf_function!(encode::SparkEncode, encode);
 make_udf_function!(like::SparkLike, like);
 make_udf_function!(luhn_check::SparkLuhnCheck, luhn_check);
+make_udf_function!(lower::SparkLower, lower);
 make_udf_function!(format_string::FormatStringFunc, format_string);
 make_udf_function!(space::SparkSpace, space);
 make_udf_function!(substring::SparkSubstring, substring);
@@ -117,6 +119,11 @@ pub mod expr_fn {
         arg1
     ));
     export_functions!((
+        lower,
+        "Converts a string to lowercase with full Unicode and contextual sigma mapping.",
+        str
+    ));
+    export_functions!((
         format_string,
         "Returns a formatted string from printf-style format strings.",
         strfmt args
@@ -174,6 +181,7 @@ pub fn functions() -> Vec<Arc<ScalarUDF>> {
         length(),
         like(),
         luhn_check(),
+        lower(),
         format_string(),
         space(),
         substring(),

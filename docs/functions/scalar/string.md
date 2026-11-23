@@ -25,9 +25,11 @@ Part of the [datafusion-spark function reference](../README.md).
 - [format_string](#format_string)
 - [ilike](#ilike)
 - [is_valid_utf8](#is_valid_utf8)
+- [lcase](#lcase)
 - [len](#len)
 - [length](#length)
 - [like](#like)
+- [lower](#lower)
 - [luhn_check](#luhn_check)
 - [make_valid_utf8](#make_valid_utf8)
 - [printf](#printf)
@@ -271,6 +273,10 @@ true
 false
 ```
 
+## `lcase`
+
+_Alias of [lower](#lower)._
+
 ## `len`
 
 _Alias of [length](#length)._
@@ -337,6 +343,39 @@ false
 > SELECT like(NULL, '_park');
 NULL
 ```
+
+## `lower`
+
+Converts a string to lowercase using full, locale-independent Unicode mapping, matching UTF8_BINARY with Spark 4.2's default case mappings. Greek capital sigma is mapped using its word context, and one character may expand (for example, İ becomes i plus a combining dot). Unlike DataFusion's `lower`, Spark's `lcase` alias and implicit atomic-to-string input coercion are provided. Binary input is decoded with invalid UTF-8 sequences replaced by U+FFFD before lowercasing. NULL returns NULL; empty input returns an empty string. The source string layout and nullability are preserved. ANSI mode does not change the string mapping. Locale-specific collations and JVM default-locale mappings are not supported. Remaining implicit CAST formatting differences are tracked by https://github.com/apache/datafusion-spark/issues/88.
+
+```sql
+lower(str)
+```
+
+### Arguments
+
+- **str**: String to lowercase, or an atomic expression implicitly cast to string. Binary input is decoded as UTF-8 with replacement. NULL returns NULL.
+
+### Example
+
+```sql
+> SELECT lower('SparkSql');
+sparksql
+> SELECT lcase('ΘΑΛΑΣΣΙΝΟΣ');
+θαλασσινος
+> SELECT lower('İ');
+i̇
+```
+
+### Alternative Syntax
+
+```sql
+lcase(str)
+```
+
+### Aliases
+
+- lcase
 
 ## `luhn_check`
 
