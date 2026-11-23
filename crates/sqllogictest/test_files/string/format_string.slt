@@ -187,6 +187,22 @@ SELECT format_string('%.3g', CAST(1234.5 AS DOUBLE));
 ----
 1.23e+03
 
+## Compact float rounding across the precision boundary
+query T
+SELECT format_string('%g', CAST(999999.5 AS DOUBLE));
+----
+1.00000e+06
+
+query T
+SELECT format_string('%g', CAST(99999.95 AS DOUBLE));
+----
+100000
+
+query T
+SELECT format_string('%,g', CAST(123456 AS DOUBLE));
+----
+123,456
+
 ## Float with width and precision
 # xfail spark: Spark types the literal as DECIMAL, and %f/%e/%g/%a of a DECIMAL errors (https://github.com/apache/datafusion-spark/issues/97)
 query T
