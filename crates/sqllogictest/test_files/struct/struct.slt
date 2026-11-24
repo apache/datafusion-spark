@@ -8,7 +8,173 @@
 # For more information, please see:
 #   https://github.com/apache/datafusion/issues/15914
 
-## Original Query: SELECT struct(1, 2, 3);
-## PySpark 3.5.5 Result: {'struct(1, 2, 3)': Row(col1=1, col2=2, col3=3), 'typeof(struct(1, 2, 3))': 'struct<col1:int,col2:int,col3:int>', 'typeof(1)': 'int', 'typeof(2)': 'int', 'typeof(3)': 'int'}
-#query
-#SELECT struct(1::int, 2::int, 3::int);
+# Literal fields use one-based names in Spark.
+query ?
+SELECT struct(1::INT, 2::INT, 3::INT);
+----
+{col1: 1, col2: 2, col3: 3}
+
+# Column names are retained, while expressions use their argument position.
+query ?
+SELECT struct(a, a + 1, b) FROM (VALUES (1::INT, 'x')) AS t(a, b);
+----
+{a: 1, col2: 2, b: x}
+
+# Qualified columns retain the unqualified name, including names resembling defaults.
+query ?
+SELECT struct(t.a, t.c0, t.col1, 7::INT) FROM (VALUES (1::INT, 2::INT, 3::INT)) AS t(a, c0, col1);
+----
+{a: 1, c0: 2, col1: 3, col4: 7}
+
+# Field names survive constant folding; duplicate names are allowed.
+query ?
+SELECT struct(a, a, 1 + 2) FROM (VALUES (4::INT)) AS t(a);
+----
+{a: 4, a: 4, col3: 3}
+
+# Explicit aliases, including an alias matching DataFusion's generated names.
+query ?
+SELECT struct(1::INT AS c0, 'x' AS label);
+----
+{c0: 1, label: x}
+
+# Scalar NULLs are fields of a non-NULL struct.
+query ?B
+SELECT struct(NULL, NULL::INT, ''), struct(NULL) IS NULL;
+----
+{col1: NULL, col2: NULL, col3: } false
+
+# Column and scalar arguments broadcast across multiple rows.
+query ? rowsort
+SELECT struct(a, 'fixed', b) FROM (VALUES (1::INT, 'x'), (NULL::INT, NULL), (3::INT, 'z')) AS t(a, b);
+----
+{a: 1, col2: fixed, b: x}
+{a: 3, col2: fixed, b: z}
+{a: NULL, col2: fixed, b: NULL}
+
+# Nested struct expressions use positional names. Nested field access retains its name.
+query ?
+SELECT struct(struct(1::INT, 'x'));
+----
+{col1: {col1: 1, col2: x}}
+
+query ?
+SELECT struct(s.a) FROM (SELECT named_struct('a', 1::INT) AS s) t;
+----
+{a: 1}
+
+# Arrays combine structs with NULL fields in either argument position.
+query ?
+SELECT array(struct(1::INT, NULL::STRING), struct(2::INT, 'x'));
+----
+[{col1: 1, col2: NULL}, {col1: 2, col2: x}]
+
+query ?
+SELECT array(struct(1::INT, 'x'), struct(2::INT, NULL::STRING));
+----
+[{col1: 1, col2: x}, {col1: 2, col2: NULL}]
+
+query ? rowsort
+SELECT array(struct(a), struct(7::INT AS a)) FROM (VALUES (1::INT), (NULL::INT)) AS t(a);
+----
+[{a: 1}, {a: 7}]
+[{a: NULL}, {a: 7}]
+
+# Spark accepts empty structs, but DataFusion's SQL parser rejects struct()
+# before ExprPlanner is called: https://github.com/apache/datafusion-sqlparser-rs/issues/3048
+# Empty named_struct execution is also deferred to https://github.com/apache/datafusion-spark/issues/224
+# query ?
+# SELECT struct();
+# ----
+# {}
+#
+# query ?
+# SELECT struct() FROM (VALUES (1), (2)) AS t(a);
+# ----
+# {}
+# {}
+#
+# query BB
+# SELECT struct() IS NULL, struct() IS NOT NULL;
+# ----
+# false true
+#
+
+# Heterogeneous and nested children retain their types.
+query ?
+SELECT struct(true, 1.25::DECIMAL(5,2), DATE '2020-01-02', array(1::INT, NULL::INT), map('x', 2::INT));
+----
+{col1: true, col2: 1.25, col3: 2020-01-02, col4: [1, NULL], col5: {x: 2}}
+
+# Field access uses the new names in both execution modes.
+query IT
+SELECT s.col1, s.col2 FROM (SELECT struct(1::INT, 'x') AS s) t;
+----
+1 x
+
+# An empty input batch produces no struct rows.
+query ?
+SELECT struct(a, 1::INT) FROM (VALUES (1::INT)) AS t(a) WHERE a < 0;
+----
+
+statement ok
+SET datafusion.execution.enable_ansi_mode = true;
+
+query ?B
+SELECT struct(1::INT, NULL), struct(NULL) IS NULL;
+----
+{col1: 1, col2: NULL} false
+
+query ?
+SELECT struct(a, a + 1) FROM (VALUES (2::INT)) AS t(a);
+----
+{a: 2, col2: 3}
+
+statement ok
+SET datafusion.execution.enable_ansi_mode = false;
+
+# Mixed explicit/implicit names are assigned by DataFusion before ExprPlanner.
+# Keep explicit aliases intact rather than guessing whether a cN name was generated.
+# Upstream planner limitation: https://github.com/apache/datafusion/issues/27723
+# Spark's expected names for this parser limitation are shown here:
+# query ?
+# SELECT struct(1::INT AS a, 2::INT);
+# ----
+# {a: 1, col2: 2}
+
+# Review regression: IF must still accept structs with NULL fields.
+# IF's physical execution is tracked separately by https://github.com/apache/datafusion-spark/issues/305.
+skipif evaluate
+query ?
+SELECT if(a > 0, struct(1::INT), struct(NULL::INT)) FROM (VALUES (1), (-1)) AS t(a);
+----
+{col1: 1}
+{col1: NULL}
+
+# DataFusion-only list syntax. Keep compatibility without a planner override.
+query ?
+SELECT [struct(1::INT, 'x'), struct(2::INT, NULL::STRING)];
+----
+[{col1: 1, col2: x}, {col1: 2, col2: NULL}]
+
+# Other common-type consumers must also keep working with nullable struct fields.
+query ?
+SELECT coalesce(struct(NULL::INT), struct(2::INT));
+----
+{col1: NULL}
+
+query ?
+SELECT CASE WHEN a > 0 THEN struct(1::INT) ELSE struct(NULL::INT) END FROM (VALUES (1), (-1)) AS t(a);
+----
+{col1: 1}
+{col1: NULL}
+
+query ??
+SELECT greatest(struct(1::INT), struct(NULL::INT)), least(struct(1::INT), struct(NULL::INT));
+----
+{col1: 1} {col1: NULL}
+
+query ?
+SELECT array_insert(array(struct(1::INT)), 2, struct(NULL::INT));
+----
+[{col1: 1}, {col1: NULL}]

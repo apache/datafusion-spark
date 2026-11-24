@@ -15,6 +15,7 @@ use datafusion_expr::{
 ///
 /// Currently this maps:
 ///
+/// * `struct(expr, ...)` to a Spark struct with one-based or column field names
 /// * `EXTRACT(field FROM expr)` to the Spark `date_part` function
 /// * `SUBSTRING(expr FROM start FOR len)` to the Spark `substring` function
 ///
@@ -70,6 +71,25 @@ impl ExprPlanner for SparkFunctionPlanner {
                 vec![expr.left, expr.right],
             ),
         )))
+    }
+
+    fn plan_struct_literal(
+        &self,
+        args: Vec<Expr>,
+        is_named_struct: bool,
+    ) -> Result<PlannerResult<Vec<Expr>>> {
+        if is_named_struct {
+            // DataFusion has already interleaved field names and values here.
+            // Generated cN names are indistinguishable from explicit cN aliases,
+            // so mixed explicit/implicit names need an upstream planner API change.
+            // Preserve explicit names, including ones that look like generated names.
+            return Ok(PlannerResult::Planned(
+                datafusion_functions::core::named_struct().call(args),
+            ));
+        }
+        Ok(PlannerResult::Planned(
+            crate::function::r#struct::expr_fn::r#struct(args),
+        ))
     }
 
     fn plan_extract(&self, args: Vec<Expr>) -> Result<PlannerResult<Vec<Expr>>> {
