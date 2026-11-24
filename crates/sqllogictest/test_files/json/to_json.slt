@@ -632,8 +632,8 @@ SELECT to_json(named_struct('a', 1::INT), map('ignoreNullFields', false));
 query error to_json: the ignoreNullFields option must be true or false, got 'maybe'
 SELECT to_json(named_struct('a', 1::INT), map('ignoreNullFields', 'maybe'));
 
-# A NULL option value is read as the string "null", as Spark does, and "null"
-# is not a boolean. Spark 4.2.0 fails here with `For input string: "null"`.
+# A NULL option value is read as the string "null", as Spark 4.2 does, and
+# "null" is not a boolean. Spark 4.2.0 fails here with `For input string: "null"`.
 query error to_json: the ignoreNullFields option must be true or false, got 'null'
 SELECT to_json(named_struct('a', 1::INT), map('ignoreNullFields', CAST(NULL AS STRING)));
 
@@ -642,7 +642,7 @@ SELECT to_json(named_struct('a', 1::INT), map('ignoreNullFields', CAST(NULL AS S
 query error Error during planning: to_json: the options argument must be a map of strings, got
 SELECT to_json(named_struct('a', 1::INT), map('ignoreNullFields', NULL));
 
-# Spark does not fail on a NULL option value as such: it returns {"a":1} here
+# Spark 4.2 does not fail on a NULL option value as such: it returns {"a":1} here
 # xfail spark: intended: to_json rejects every option it does not support, Spark ignores the names it does not know
 query error to_json: unsupported option 'noSuchOption', supported options: ignoreNullFields
 SELECT to_json(named_struct('a', 1::INT), map('noSuchOption', CAST(NULL AS STRING)));

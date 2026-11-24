@@ -273,9 +273,9 @@ impl ToJsonOptions {
         let values = cast(entries.column(1), &DataType::Utf8)?;
         let (keys, values) = (keys.as_string::<i32>(), values.as_string::<i32>());
         for i in 0..keys.len() {
-            // Spark reads a NULL value as the string "null". The NULL option
-            // records in json/to_json.slt cover this, checked against Spark
-            // 4.2.0.
+            // Spark 4.2 reads a NULL value as the string "null". The NULL
+            // option records in json/to_json.slt cover this, checked against
+            // Spark 4.2.0.
             let value = if values.is_null(i) {
                 "null"
             } else {
@@ -1556,8 +1556,8 @@ mod tests {
 
     #[test]
     fn test_invalid_boolean_option_errors() {
-        // Scala's toBoolean takes true and false only; Spark reads a NULL
-        // value as the string "null"
+        // Scala's toBoolean takes true and false only; Spark 4.2 reads a
+        // NULL value as the string "null"
         for value in [Some("yes"), Some("1"), Some(""), None] {
             let err = parse_options(&[("ignoreNullFields", value)]).unwrap_err();
             assert!(err.to_string().contains("must be true or false"), "{err}");
