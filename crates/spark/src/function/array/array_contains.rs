@@ -3,12 +3,16 @@
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
 use crate::function::float_normalize::normalize_floats;
+use crate::function::type_coercion::{
+    is_orderable, spark_sql_type, struct_field_types_match, wider_type,
+};
 use arrow::array::{
     Array, AsArray, BooleanArray, BooleanBufferBuilder, GenericListArray, OffsetSizeTrait,
 };
 use arrow::buffer::{BooleanBuffer, NullBuffer};
-use arrow::datatypes::DataType;
-use datafusion_common::{Result, exec_err};
+use arrow::datatypes::{DataType, Field};
+use datafusion_common::utils::take_function_args;
+use datafusion_common::{Result, exec_err, plan_err};
 use datafusion_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
 };
@@ -41,7 +45,7 @@ impl Default for SparkArrayContains {
 impl SparkArrayContains {
     pub fn new() -> Self {
         Self {
-            signature: Signature::array_and_element(Volatility::Immutable),
+            signature: Signature::user_defined(Volatility::Immutable),
         }
     }
 }
@@ -59,6 +63,11 @@ impl ScalarUDFImpl for SparkArrayContains {
         Ok(DataType::Boolean)
     }
 
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        let [array, element] = take_function_args(self.name(), arg_types)?;
+        coerce_array_and_element(self.name(), array, element)
+    }
+
     fn invoke_with_args(&self, mut args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         for arg in &mut args.args {
             *arg = normalize_floats(arg)?;
@@ -70,6 +79,65 @@ impl ScalarUDFImpl for SparkArrayContains {
         let patched = apply_spark_null_semantics(result_array.as_boolean(), &haystack)?;
         Ok(ColumnarValue::Array(Arc::new(patched)))
     }
+}
+
+/// Casts the array element and the search element to their wider type, and rejects the
+/// argument types that Spark's `ArrayContains.checkInputDataTypes` rejects.
+fn coerce_array_and_element(
+    name: &str,
+    array: &DataType,
+    element: &DataType,
+) -> Result<Vec<DataType>> {
+    if array.is_null() || element.is_null() {
+        return null_type_err(name);
+    }
+    let (item, large) = match array {
+        DataType::List(field) | DataType::FixedSizeList(field, _) => (field, false),
+        DataType::LargeList(field) => (field, true),
+        other => {
+            return plan_err!(
+                "[DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE] The first parameter of `{name}` \
+                 requires the \"ARRAY\" type, however it has the type \"{}\". SQLSTATE: 42K09",
+                spark_sql_type(other)
+            );
+        }
+    };
+    // Spark's `ArrayContains.inputTypes` calls `TypeCoercion.findWiderTypeWithoutStringPromotionForTwo`.
+    let common = wider_type(item.data_type(), element, false)
+        .filter(|_| struct_field_types_match(item.data_type(), element));
+    let Some(common) = common else {
+        return plan_err!(
+            "[DATATYPE_MISMATCH.ARRAY_FUNCTION_DIFF_TYPES] Input to `{name}` should have \
+             been \"ARRAY\" followed by a value with same element type, but it's \
+             [\"{}\", \"{}\"]. SQLSTATE: 42K09",
+            spark_sql_type(array),
+            spark_sql_type(element)
+        );
+    };
+    if common.is_null() {
+        return null_type_err(name);
+    }
+    if !is_orderable(&common) {
+        return plan_err!(
+            "[DATATYPE_MISMATCH.INVALID_ORDERING_TYPE] The `{name}` does not support \
+             ordering on type \"{}\". SQLSTATE: 42K09",
+            spark_sql_type(&common)
+        );
+    }
+    let item = Arc::new(Field::new(item.name(), common.clone(), true));
+    let array = if large {
+        DataType::LargeList(item)
+    } else {
+        DataType::List(item)
+    };
+    Ok(vec![array, common])
+}
+
+fn null_type_err<T>(name: &str) -> Result<T> {
+    plan_err!(
+        "[DATATYPE_MISMATCH.NULL_TYPE] Null typed values cannot be used as arguments of \
+         `{name}`. SQLSTATE: 42K09"
+    )
 }
 
 /// For each row where `array_has` returned `false`, set the output to null
@@ -161,7 +229,7 @@ fn mask_with_list_nulls(
 mod tests {
     use super::*;
     use arrow::array::{FixedSizeListArray, Float64Array};
-    use arrow::datatypes::Field;
+    use arrow::datatypes::{Field, Fields};
     use datafusion_common::ScalarValue;
 
     #[test]
@@ -193,5 +261,167 @@ mod tests {
             .to_array(1)
             .unwrap();
         assert_eq!(result.as_boolean(), &BooleanArray::from(vec![Some(false)]));
+    }
+
+    #[test]
+    fn test_coerce_types_untyped_null_array() {
+        let udf = SparkArrayContains::new();
+        let err = udf
+            .coerce_types(&[DataType::Null, DataType::Int32])
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("[DATATYPE_MISMATCH.NULL_TYPE] Null typed values cannot be used as arguments of `array_contains`. SQLSTATE: 42K09")
+        );
+    }
+
+    #[test]
+    fn test_coerce_types_untyped_null_element() {
+        let udf = SparkArrayContains::new();
+        let err = udf
+            .coerce_types(&[
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                DataType::Null,
+            ])
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("[DATATYPE_MISMATCH.NULL_TYPE] Null typed values cannot be used as arguments of `array_contains`. SQLSTATE: 42K09")
+        );
+    }
+
+    #[test]
+    fn test_coerce_types_both_untyped_null() {
+        let udf = SparkArrayContains::new();
+        let err = udf
+            .coerce_types(&[DataType::Null, DataType::Null])
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("[DATATYPE_MISMATCH.NULL_TYPE] Null typed values cannot be used as arguments of `array_contains`. SQLSTATE: 42K09")
+        );
+    }
+
+    #[test]
+    fn test_coerce_types_same_type() {
+        let udf = SparkArrayContains::new();
+        let array_type =
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true)));
+        let coerced = udf
+            .coerce_types(&[array_type.clone(), DataType::Int32])
+            .unwrap();
+        assert_eq!(coerced, vec![array_type, DataType::Int32]);
+    }
+
+    #[test]
+    fn test_coerce_types_decimal_widening() {
+        let udf = SparkArrayContains::new();
+        let array_type =
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true)));
+        let coerced = udf
+            .coerce_types(&[array_type, DataType::Decimal128(2, 1)])
+            .unwrap();
+        let expected_common = DataType::Decimal128(11, 1);
+        let expected_array =
+            DataType::List(Arc::new(Field::new("item", expected_common.clone(), true)));
+        assert_eq!(coerced, vec![expected_array, expected_common]);
+    }
+
+    #[test]
+    fn test_coerce_types_nested_decimal_widening() {
+        let udf = SparkArrayContains::new();
+        let inner_array =
+            DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
+        let outer_array = DataType::List(Arc::new(Field::new("item", inner_array, true)));
+        let search_element = DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::Decimal128(2, 1),
+            true,
+        )));
+        let coerced = udf.coerce_types(&[outer_array, search_element]).unwrap();
+        let expected_inner = DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::Decimal128(21, 1),
+            true,
+        )));
+        let expected_outer =
+            DataType::List(Arc::new(Field::new("item", expected_inner.clone(), true)));
+        assert_eq!(coerced, vec![expected_outer, expected_inner]);
+    }
+
+    #[test]
+    fn test_coerce_types_widening() {
+        let udf = SparkArrayContains::new();
+        let array_type =
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true)));
+        let expected_array_type =
+            DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
+        let coerced = udf.coerce_types(&[array_type, DataType::Int64]).unwrap();
+        assert_eq!(coerced, vec![expected_array_type, DataType::Int64]);
+    }
+
+    #[test]
+    fn test_coerce_types_type_mismatch() {
+        let udf = SparkArrayContains::new();
+        let array_type =
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true)));
+        let err = udf.coerce_types(&[array_type, DataType::Utf8]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("[DATATYPE_MISMATCH.ARRAY_FUNCTION_DIFF_TYPES]")
+        );
+    }
+
+    #[test]
+    fn test_coerce_types_unexpected_input_type() {
+        let udf = SparkArrayContains::new();
+        let err = udf
+            .coerce_types(&[DataType::Int32, DataType::Int32])
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("[DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE]")
+        );
+    }
+
+    #[test]
+    fn test_coerce_types_invalid_ordering_type() {
+        let udf = SparkArrayContains::new();
+        let map_entries = DataType::Struct(Fields::from(vec![
+            Field::new("key", DataType::Int32, false),
+            Field::new("value", DataType::Int32, true),
+        ]));
+        let map_type =
+            DataType::Map(Arc::new(Field::new("entries", map_entries, false)), false);
+        let array_type =
+            DataType::List(Arc::new(Field::new("item", map_type.clone(), true)));
+        let err = udf.coerce_types(&[array_type, map_type]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("[DATATYPE_MISMATCH.INVALID_ORDERING_TYPE]")
+        );
+    }
+
+    #[test]
+    fn test_coerce_types_null_element_list_widening() {
+        let udf = SparkArrayContains::new();
+        let null_array_type =
+            DataType::List(Arc::new(Field::new("item", DataType::Null, true)));
+        let expected_array_type =
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true)));
+        let coerced = udf
+            .coerce_types(&[null_array_type, DataType::Int32])
+            .unwrap();
+        assert_eq!(coerced, vec![expected_array_type, DataType::Int32]);
+    }
+
+    #[test]
+    fn test_coerce_types_wrong_arity() {
+        let udf = SparkArrayContains::new();
+        assert!(udf.coerce_types(&[DataType::Int32]).is_err());
+        assert!(
+            udf.coerce_types(&[DataType::Int32, DataType::Int32, DataType::Int32])
+                .is_err()
+        );
     }
 }

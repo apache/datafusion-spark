@@ -39,17 +39,33 @@ SELECT array_contains(array(1, NULL, 3), 3);
 ----
 true
 
-# Null array -> null
-# xfail spark: Spark rejects an untyped NULL argument (NULL_TYPE), datafusion-spark returns NULL (https://github.com/apache/datafusion-spark/issues/367)
-query B
+# Untyped NULL array is rejected at planning time, as in Spark.
+query error \[DATATYPE_MISMATCH\.NULL_TYPE\] Null typed values cannot be used as arguments of `array_contains`
 SELECT array_contains(NULL, 1);
+
+# Untyped NULL element is rejected at planning time, as in Spark.
+query error \[DATATYPE_MISMATCH\.NULL_TYPE\] Null typed values cannot be used as arguments of `array_contains`
+SELECT array_contains(array(1, 2, 3), NULL);
+
+# Both untyped NULL arguments are rejected at planning time.
+query error \[DATATYPE_MISMATCH\.NULL_TYPE\] Null typed values cannot be used as arguments of `array_contains`
+SELECT array_contains(NULL, NULL);
+
+# Typed NULL array -> NULL
+query B
+SELECT array_contains(CAST(NULL AS ARRAY<INT>), 1);
 ----
 NULL
 
-# Null element -> null
-# xfail spark: Spark rejects an untyped NULL argument (NULL_TYPE), datafusion-spark returns NULL (https://github.com/apache/datafusion-spark/issues/367)
+# Typed NULL element -> NULL
 query B
-SELECT array_contains(array(1, 2, 3), NULL);
+SELECT array_contains(array(1, 2, 3), CAST(NULL AS INT));
+----
+NULL
+
+# Typed NULL array and element -> NULL
+query B
+SELECT array_contains(CAST(NULL AS ARRAY<INT>), CAST(NULL AS INT));
 ----
 NULL
 
@@ -244,3 +260,157 @@ ORDER BY column1;
 
 statement ok
 DROP TABLE test_float_arrays;
+
+###
+### Type coercion
+###
+
+# The array element and the search element are both cast to their wider type
+# (Spark's findWiderTypeWithoutStringPromotionForTwo): here INT and BIGINT become BIGINT.
+query B
+SELECT array_contains(array(CAST(1 AS INT), CAST(2 AS INT), CAST(3 AS INT)), 2L);
+----
+true
+
+query B
+SELECT array_contains(array(1, 2, 3), CAST(2.0 AS DOUBLE));
+----
+true
+
+# INT and DOUBLE become DOUBLE, so 1.23 does not match 1
+query B
+SELECT array_contains(array(CAST(1 AS INT)), CAST(1.23 AS DOUBLE));
+----
+false
+
+query B
+SELECT array_contains(array(CAST(1 AS INT)), CAST(1.0 AS DOUBLE));
+----
+true
+
+query B
+SELECT array_contains(array(CAST(1 AS DOUBLE)), CAST(1 AS INT));
+----
+true
+
+query B
+SELECT array_contains(array(CAST(1 AS FLOAT)), 1L);
+----
+true
+
+query B
+SELECT array_contains(array(array(CAST(1 AS INT))), array(CAST(1.0 AS DOUBLE)));
+----
+true
+
+# Decimal widening:
+# Integer and decimal widen to a decimal wide enough for both
+query B
+SELECT array_contains(array(1, 2), CAST(1.0 AS DECIMAL(2,1)));
+----
+true
+
+query B
+SELECT array_contains(array(CAST(1 AS INT)), CAST(1.0 AS DECIMAL(2,1)));
+----
+true
+
+query B
+SELECT array_contains(array(CAST(1 AS INT)), CAST(1 AS DECIMAL(38,2)));
+----
+true
+
+query B
+SELECT array_contains(array(CAST(1 AS DECIMAL(12,2))), CAST(1 AS INT));
+----
+true
+
+# Nested array with decimal widening
+query B
+SELECT array_contains(array(array(1)), array(CAST(1.0 AS DECIMAL(2,1))));
+----
+true
+
+# Two decimals widen to the wider decimal type
+query B
+SELECT array_contains(array(CAST(1.0 AS DECIMAL(3,1))), CAST(1.00 AS DECIMAL(4,2)));
+----
+true
+
+query B
+SELECT array_contains(array(CAST(1.0 AS DECIMAL(3,1))), CAST(2.00 AS DECIMAL(4,2)));
+----
+false
+
+# Decimals and floating point numbers widen to DOUBLE
+query B
+SELECT array_contains(array(CAST(1 AS DECIMAL(5,1))), CAST(1.0 AS DOUBLE));
+----
+true
+
+query B
+SELECT array_contains(array(CAST(1.0 AS DOUBLE)), CAST(1 AS DECIMAL(5,1)));
+----
+true
+
+# Strings and numbers are not cast to each other, in either direction
+query error \[DATATYPE_MISMATCH\.ARRAY_FUNCTION_DIFF_TYPES\]
+SELECT array_contains(array(1, 2), '1');
+
+query error \[DATATYPE_MISMATCH\.ARRAY_FUNCTION_DIFF_TYPES\] Input to `array_contains` should have been "ARRAY" followed by a value with same element type, but it's \["ARRAY<STRING>", "INT"\]\. SQLSTATE: 42K09
+SELECT array_contains(array('1'), CAST(1 AS INT));
+
+query error \[DATATYPE_MISMATCH\.ARRAY_FUNCTION_DIFF_TYPES\]
+SELECT array_contains(array(1), CAST(NULL AS STRING));
+
+query error \[DATATYPE_MISMATCH\.ARRAY_FUNCTION_DIFF_TYPES\]
+SELECT array_contains(array(array(1)), array('1'));
+
+query error \[DATATYPE_MISMATCH\.ARRAY_FUNCTION_DIFF_TYPES\]
+SELECT array_contains(array(true), 1);
+
+query error \[DATATYPE_MISMATCH\.ARRAY_FUNCTION_DIFF_TYPES\]
+SELECT array_contains(array(DATE '2020-01-01'), '2020-01-01');
+
+# First parameter must be an ARRAY
+query error \[DATATYPE_MISMATCH\.UNEXPECTED_INPUT_TYPE\] The first parameter of `array_contains` requires the "ARRAY" type
+SELECT array_contains(1, 1);
+
+# A dictionary-encoded element or array has the type of its values
+query BB
+SELECT array_contains(array('a', 'b'), arrow_cast('b', 'Dictionary(Int32, Utf8)')), array_contains(array(arrow_cast('a', 'Dictionary(Int32, Utf8)'), arrow_cast('b', 'Dictionary(Int32, Utf8)')), 'b');
+----
+true true
+
+# DATE and TIMESTAMP become TIMESTAMP
+query B
+SELECT array_contains(array(DATE '2020-01-01'), TIMESTAMP '2020-01-01 00:00:00');
+----
+true
+
+# Struct field types are not widened, as in Spark with ANSI mode off. With ANSI mode on, Spark
+# widens them and returns true here.
+query error \[DATATYPE_MISMATCH\.ARRAY_FUNCTION_DIFF_TYPES\]
+SELECT array_contains(array(named_struct('a', CAST(1 AS INT))), named_struct('a', 1L));
+
+# Fields may differ in nullability
+query B
+SELECT array_contains(array(named_struct('a', 1, 'b', CAST(NULL AS BIGINT))), named_struct('a', 1, 'b', 2L));
+----
+false
+
+query B
+SELECT array_contains(array(named_struct('a', 1, 'b', 2L)), named_struct('a', 1, 'b', 2L));
+----
+true
+
+# Maps cannot be ordered, so map elements are rejected at any depth
+query error \[DATATYPE_MISMATCH\.INVALID_ORDERING_TYPE\] The `array_contains` does not support ordering on type
+SELECT array_contains(array(map(1, 2)), map(1, 2));
+
+query error \[DATATYPE_MISMATCH\.INVALID_ORDERING_TYPE\]
+SELECT array_contains(array(named_struct('m', map(1, 2))), named_struct('m', map(1, 2)));
+
+query error \[DATATYPE_MISMATCH\.INVALID_ORDERING_TYPE\]
+SELECT array_contains(array(array(map(1, 2))), array(map(1, 2)));
+
