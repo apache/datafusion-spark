@@ -2,46 +2,36 @@
 # SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 # SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
-# `base64` has no `invoke_with_args` yet, so the records that call it are marked
-# `skipif evaluate` until https://github.com/apache/datafusion-spark/issues/313 is fixed.
-
-skipif evaluate
 query T
 SELECT base64('Spark SQL'::string);
 ----
 U3BhcmsgU1FM
 
-skipif evaluate
 query T
 SELECT base64('Spark SQ'::string);
 ----
 U3BhcmsgU1E=
 
-skipif evaluate
 query T
 SELECT base64('Spark S'::string);
 ----
 U3BhcmsgUw==
 
-skipif evaluate
 query T
 SELECT base64('Spark SQL'::bytea);
 ----
 U3BhcmsgU1FM
 
-skipif evaluate
 query T
 SELECT base64(NULL::string);
 ----
 NULL
 
-skipif evaluate
 query T
 SELECT base64(NULL::bytea);
 ----
 NULL
 
-skipif evaluate
 query T
 SELECT base64(column1)
 FROM VALUES
@@ -54,6 +44,34 @@ U3BhcmsgU1FM
 U3BhcmsgU1E=
 U3BhcmsgUw==
 NULL
+
+query TT
+SELECT base64(arrow_cast('Spark SQL', 'LargeUtf8')), arrow_typeof(base64(arrow_cast('Spark SQL', 'LargeUtf8')));
+----
+U3BhcmsgU1FM LargeUtf8
+
+query TT
+SELECT base64(arrow_cast('Spark SQL', 'Utf8View')), arrow_typeof(base64(arrow_cast('Spark SQL', 'Utf8View')));
+----
+U3BhcmsgU1FM Utf8
+
+query TT
+SELECT base64(arrow_cast('Spark SQL'::bytea, 'LargeBinary')), arrow_typeof(base64(arrow_cast('Spark SQL'::bytea, 'LargeBinary')));
+----
+U3BhcmsgU1FM LargeUtf8
+
+query T
+SELECT base64(''::string);
+----
+(empty)
+
+# Spark 4.2.0 and 3.5.9 split the output into 76-character lines joined by \r\n
+# (spark.sql.chunkBase64String.enabled is true by default); DataFusion does not
+# https://github.com/apache/datafusion-spark/issues/411
+# query T
+# SELECT base64(repeat('a', 60));
+# ----
+# YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh\r\nYWFh
 
 query error Error during planning: Function 'base64' requires Binary, but received Int32 \(DataType: Int32\)
 SELECT base64(12::integer);

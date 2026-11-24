@@ -12,7 +12,7 @@ use datafusion_common::cast::{
 };
 use datafusion_common::types::{NativeType, logical_string};
 use datafusion_common::utils::take_function_args;
-use datafusion_common::{Result, exec_err, internal_err};
+use datafusion_common::{Result, ScalarValue, exec_err, internal_err};
 use datafusion_expr::simplify::{ExprSimplifyResult, SimplifyContext};
 use datafusion_expr::{Coercion, Expr, ReturnFieldArgs, TypeSignatureClass, lit};
 use datafusion_expr::{
@@ -22,6 +22,9 @@ use datafusion_expr::{
 use datafusion_functions::expr_fn::encode;
 use datafusion_functions::utils::make_scalar_function;
 use datafusion_macros::user_doc;
+
+/// The `encode` format that matches Spark's `base64`: standard alphabet, padded.
+const BASE64_ENCODING: &str = "base64pad";
 
 /// Spark-compatible `base64` expression.
 ///
@@ -99,11 +102,13 @@ impl ScalarUDFImpl for SparkBase64 {
         )))
     }
 
-    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        exec_err!(
-            "invoke should not be called on a simplified {} function",
-            self.name()
-        )
+    fn invoke_with_args(&self, mut args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        // Same as the simplified form: encode(bin, 'base64pad')
+        args.args
+            .push(ColumnarValue::Scalar(ScalarValue::from(BASE64_ENCODING)));
+        args.arg_fields
+            .push(Arc::new(Field::new("encoding", DataType::Utf8, false)));
+        datafusion_functions::encoding::encode().invoke_with_args(args)
     }
 
     fn simplify(
@@ -114,7 +119,7 @@ impl ScalarUDFImpl for SparkBase64 {
         let [bin] = take_function_args(self.name(), args)?;
         Ok(ExprSimplifyResult::Simplified(encode(
             bin,
-            lit("base64pad"),
+            lit(BASE64_ENCODING),
         )))
     }
 }
