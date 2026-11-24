@@ -5,6 +5,7 @@
 use std::ops::Add;
 use std::sync::Arc;
 
+use arrow::compute::kernels::numeric::add;
 use arrow::datatypes::{DataType, Field, FieldRef, IntervalUnit};
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, internal_err};
@@ -14,6 +15,7 @@ use datafusion_expr::{
     ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
 };
 use datafusion_macros::user_doc;
+use datafusion_physical_expr_common::datum::apply;
 
 /// Spark-compatible `add_months` expression.
 ///
@@ -105,7 +107,11 @@ impl ScalarUDFImpl for SparkAddMonths {
         Ok(ExprSimplifyResult::Simplified(date_arg.add(interval)))
     }
 
-    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        internal_err!("invoke should not be called on a simplified add_months() function")
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        // Same as the simplified form: start_date + CAST(num_months AS INTERVAL)
+        let [date_arg, months_arg] = take_function_args("add_months", args.args)?;
+        let interval =
+            months_arg.cast_to(&DataType::Interval(IntervalUnit::YearMonth), None)?;
+        apply(&date_arg, &interval, add)
     }
 }
