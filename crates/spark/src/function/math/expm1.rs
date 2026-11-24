@@ -74,13 +74,13 @@ impl ScalarUDFImpl for SparkExpm1 {
         let [arg] = take_function_args(self.name(), args.args)?;
         match arg {
             ColumnarValue::Scalar(ScalarValue::Float64(value)) => Ok(
-                ColumnarValue::Scalar(ScalarValue::Float64(value.map(|x| x.exp_m1()))),
+                ColumnarValue::Scalar(ScalarValue::Float64(value.map(spark_expm1))),
             ),
             ColumnarValue::Array(array) => match array.data_type() {
                 DataType::Float64 => Ok(ColumnarValue::Array(Arc::new(
                     array
                         .as_primitive::<Float64Type>()
-                        .unary::<_, Float64Type>(|x| x.exp_m1()),
+                        .unary::<_, Float64Type>(spark_expm1),
                 )
                     as ArrayRef)),
                 other => Err(unsupported_data_type_exec_err(
@@ -96,4 +96,15 @@ impl ScalarUDFImpl for SparkExpm1 {
             )),
         }
     }
+}
+
+/// Spark's `Expm1` calls Java's `StrictMath.expm1`, which returns fdlibm's
+/// result on every platform. `f64::exp_m1` calls the platform's C math library,
+/// which can differ in the last bit, as on macOS. `libm::expm1` is a port of
+/// FreeBSD's `s_expm1.c` from Sun's fdlibm. It was checked bit for bit against
+/// Java's `StrictMath.expm1` on a few million inputs (random bit patterns, tiny
+/// values, thresholds, the overflow threshold and special values) with no
+/// mismatches.
+fn spark_expm1(x: f64) -> f64 {
+    libm::expm1(x)
 }
