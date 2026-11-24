@@ -2,11 +2,12 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::cast::AsArray;
 use arrow::array::types::Decimal128Type;
 use arrow::array::{ArrowNativeTypeOp, Decimal128Array, Int64Array};
 use arrow::compute::kernels::arity::unary;
-use arrow::datatypes::{DataType, Field, FieldRef};
+use arrow::datatypes::{DataType, FieldRef};
 use datafusion_common::{DataFusionError, ScalarValue, exec_err, internal_err};
 use datafusion_expr::{
     ColumnarValue, Documentation, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl,
@@ -14,6 +15,9 @@ use datafusion_expr::{
 };
 use datafusion_macros::user_doc;
 use std::sync::Arc;
+
+/// Spark's `Floor` is a null-intolerant `UnaryMathExpression`, which is always nullable.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant_always_nullable();
 
 /// Spark-compatible `floor` expression.
 ///
@@ -79,7 +83,6 @@ impl ScalarUDFImpl for SparkFloor {
         &self,
         args: ReturnFieldArgs,
     ) -> datafusion_common::Result<FieldRef> {
-        let nullable = args.arg_fields.iter().any(|f| f.is_nullable());
         let return_type = match args.arg_fields[0].data_type() {
             DataType::Decimal128(p, s) if *s > 0 => {
                 let new_p = (*p - *s as u8 + 1).clamp(1, 38);
@@ -97,8 +100,10 @@ impl ScalarUDFImpl for SparkFloor {
                 args.arg_fields[0].data_type()
             )?,
         };
-        Ok(Arc::new(Field::new(self.name(), return_type, nullable)))
+        Ok(NULLABILITY.return_field(self.name(), return_type, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()

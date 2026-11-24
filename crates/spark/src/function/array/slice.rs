@@ -18,6 +18,11 @@ use datafusion_functions_nested::extract::array_slice_udf;
 use datafusion_macros::user_doc;
 use std::sync::Arc;
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
+
+/// Spark's `Slice` is a null-intolerant `TernaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
+
 /// Spark-compatible `slice` expression.
 ///
 /// <https://spark.apache.org/docs/latest/api/sql/index.html#slice>
@@ -94,8 +99,6 @@ impl ScalarUDFImpl for SparkSlice {
     }
 
     fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
-        let nullable = args.arg_fields.iter().any(|f| f.is_nullable());
-
         let data_type = match args.arg_fields[0].data_type() {
             DataType::Null => {
                 DataType::List(Arc::new(Field::new_list_field(DataType::Null, true)))
@@ -103,8 +106,10 @@ impl ScalarUDFImpl for SparkSlice {
             dt => dt.clone(),
         };
 
-        Ok(Arc::new(Field::new("slice", data_type, nullable)))
+        Ok(NULLABILITY.return_field("slice", data_type, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()

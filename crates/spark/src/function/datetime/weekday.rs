@@ -2,9 +2,7 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
-use std::sync::Arc;
-
-use arrow::datatypes::{DataType, Field, FieldRef};
+use arrow::datatypes::{DataType, FieldRef};
 use datafusion_common::types::{NativeType, logical_date};
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, internal_err};
@@ -15,6 +13,10 @@ use datafusion_expr::{
 use datafusion_macros::user_doc;
 
 use super::dayofweek::{epoch_day_field, week_day};
+use crate::function::nullability::{SparkNullability, spark_nullability};
+
+/// Spark's `WeekDay` is a null-intolerant `UnaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `weekday` expression.
 ///
@@ -79,9 +81,10 @@ impl ScalarUDFImpl for SparkWeekDay {
     }
 
     fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
-        let nullable = args.arg_fields.iter().any(|f| f.is_nullable());
-        Ok(Arc::new(Field::new(self.name(), DataType::Int32, nullable)))
+        Ok(NULLABILITY.return_field(self.name(), DataType::Int32, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()
@@ -97,8 +100,9 @@ impl ScalarUDFImpl for SparkWeekDay {
 mod tests {
     use super::*;
     use arrow::array::{AsArray, Date32Array, Int32Array};
-    use arrow::datatypes::Int32Type;
+    use arrow::datatypes::{Field, Int32Type};
     use datafusion_common::ScalarValue;
+    use std::sync::Arc;
 
     #[test]
     fn test_weekday_return_field_nullability_matches_input() {

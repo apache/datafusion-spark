@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{Array, ArrayRef, AsArray, StringBuilder};
-use arrow::datatypes::{DataType, Field, FieldRef, Int64Type};
+use arrow::datatypes::{DataType, FieldRef, Int64Type};
 use datafusion_common::types::{NativeType, logical_int64};
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, internal_err};
@@ -14,6 +15,9 @@ use datafusion_expr::{
 use datafusion_functions::utils::make_scalar_function;
 use datafusion_macros::user_doc;
 use std::sync::Arc;
+
+/// Spark's `Bin` is a null-intolerant `UnaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `bin` expression.
 ///
@@ -81,12 +85,10 @@ impl ScalarUDFImpl for SparkBin {
         &self,
         args: datafusion_expr::ReturnFieldArgs,
     ) -> Result<FieldRef> {
-        Ok(Arc::new(Field::new(
-            self.name(),
-            DataType::Utf8,
-            args.arg_fields[0].is_nullable(),
-        )))
+        Ok(NULLABILITY.return_field(self.name(), DataType::Utf8, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()

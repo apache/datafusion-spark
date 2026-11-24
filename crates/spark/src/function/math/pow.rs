@@ -14,12 +14,16 @@ use arrow::array::{Array, ArrayRef, Float64Array};
 use arrow::compute::binary;
 use arrow::datatypes::DataType;
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, ScalarValue};
 use datafusion_expr::{
     ColumnarValue, Documentation, ScalarFunctionArgs, ScalarUDFImpl, Signature,
 };
 use datafusion_functions::math::power::PowerFunc;
+
+/// Spark's `Pow` is a null-intolerant `BinaryMathExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible implementation of `pow` / `power`.
 ///
@@ -69,6 +73,8 @@ impl ScalarUDFImpl for SparkPow {
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         self.inner.return_type(arg_types)
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         // Only Float64 × Float64 needs the Spark override.

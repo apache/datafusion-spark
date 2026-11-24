@@ -7,9 +7,10 @@ use crate::function::map::utils::{
     get_element_type, get_list_offsets, get_list_values,
     map_from_keys_values_offsets_nulls, map_type_from_key_value_types,
 };
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{Array, ArrayRef, NullArray};
 use arrow::compute::kernels::cast;
-use arrow::datatypes::{DataType, Field, FieldRef};
+use arrow::datatypes::{DataType, FieldRef};
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, internal_err};
 use datafusion_expr::{
@@ -17,7 +18,9 @@ use datafusion_expr::{
     Volatility,
 };
 use datafusion_functions::utils::make_scalar_function;
-use std::sync::Arc;
+
+/// Spark's `MapFromArrays` is a null-intolerant `BinaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `map_from_arrays` expression
 /// <https://spark.apache.org/docs/latest/api/sql/index.html#map_from_arrays>
@@ -62,11 +65,10 @@ impl ScalarUDFImpl for MapFromArrays {
             get_element_type(keys_field.data_type())?,
             get_element_type(values_field.data_type())?,
         );
-        // Spark marks map_from_arrays as null intolerant, so the output is
-        // nullable if either input is nullable.
-        let nullable = keys_field.is_nullable() || values_field.is_nullable();
-        Ok(Arc::new(Field::new(self.name(), map_type, nullable)))
+        Ok(NULLABILITY.return_field(self.name(), map_type, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         let last_value_wins = map_last_value_wins(&args.config_options);
@@ -104,6 +106,8 @@ fn map_from_arrays_inner(args: &[ArrayRef], last_value_wins: bool) -> Result<Arr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::datatypes::Field;
+    use std::sync::Arc;
 
     #[test]
     fn test_map_from_arrays_nullability_and_type() {

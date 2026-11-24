@@ -3,6 +3,7 @@
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
 use crate::function::float_normalize::normalize_array;
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use crate::function::type_coercion::{
     is_orderable, spark_sql_type, struct_field_types_match, tightest_common_type,
 };
@@ -23,6 +24,9 @@ use datafusion_expr::{
 use datafusion_macros::user_doc;
 use num_traits::Float;
 use std::sync::Arc;
+
+/// Spark's `ArrayRemove` is a null-intolerant `BinaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `array_remove` expression.
 ///
@@ -84,6 +88,8 @@ impl ScalarUDFImpl for SparkArrayRemove {
         let [array, _] = take_function_args(self.name(), arg_types)?;
         Ok(array.clone())
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
         let [array, element] = take_function_args(self.name(), arg_types)?;

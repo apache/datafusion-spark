@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{ArrowNativeTypeOp, AsArray, Decimal128Array};
 use arrow::datatypes::{DataType, Decimal128Type, Float32Type, Float64Type, Int64Type};
 use datafusion_common::utils::take_function_args;
@@ -13,6 +14,9 @@ use datafusion_expr::{
     Volatility,
 };
 use datafusion_macros::user_doc;
+
+/// Spark's `Ceil` is a null-intolerant `UnaryMathExpression`, which is always nullable.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant_always_nullable();
 
 /// Spark-compatible `ceil` expression.
 ///
@@ -89,6 +93,8 @@ impl ScalarUDFImpl for SparkCeil {
             other => exec_err!("Unsupported data type {other:?} for function ceil"),
         }
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn aliases(&self) -> &[String] {
         &self.aliases

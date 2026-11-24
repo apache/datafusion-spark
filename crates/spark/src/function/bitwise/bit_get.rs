@@ -10,7 +10,7 @@ use arrow::array::{
     downcast_integer_array,
 };
 use arrow::compute::try_binary;
-use arrow::datatypes::{ArrowNativeType, DataType, Field, FieldRef, Int8Type, Int32Type};
+use arrow::datatypes::{ArrowNativeType, DataType, FieldRef, Int8Type, Int32Type};
 use datafusion_common::types::{NativeType, logical_int32};
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, internal_err};
@@ -20,6 +20,11 @@ use datafusion_expr::{
 };
 use datafusion_functions::utils::make_scalar_function;
 use datafusion_macros::user_doc;
+
+use crate::function::nullability::{SparkNullability, spark_nullability};
+
+/// Spark's `BitwiseGet` is a null-intolerant `BinaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `bit_get` expression.
 ///
@@ -97,10 +102,10 @@ impl ScalarUDFImpl for SparkBitGet {
     }
 
     fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
-        // Spark derives nullability for BinaryExpression from its children
-        let nullable = args.arg_fields.iter().any(|f| f.is_nullable());
-        Ok(Arc::new(Field::new(self.name(), DataType::Int8, nullable)))
+        Ok(NULLABILITY.return_field(self.name(), DataType::Int8, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()
@@ -142,6 +147,7 @@ fn spark_bit_get(args: &[ArrayRef]) -> Result<ArrayRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::datatypes::Field;
 
     #[test]
     fn test_bit_get_nullability_non_nullable_inputs() {

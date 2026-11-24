@@ -4,8 +4,9 @@
 
 use std::sync::Arc;
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{ArrayRef, AsArray, Date32Array};
-use arrow::datatypes::{DataType, Date32Type, Field, FieldRef};
+use arrow::datatypes::{DataType, Date32Type, FieldRef};
 use chrono::{Datelike, Duration, NaiveDate};
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, ScalarValue, exec_datafusion_err, internal_err};
@@ -14,6 +15,9 @@ use datafusion_expr::{
     Signature, Volatility,
 };
 use datafusion_macros::user_doc;
+
+/// Spark's `LastDay` is a null-intolerant `UnaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `last_day` expression.
 ///
@@ -67,16 +71,10 @@ impl ScalarUDFImpl for SparkLastDay {
     }
 
     fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
-        let Some(field) = args.arg_fields.first() else {
-            return internal_err!("Spark `last_day` expects exactly one argument");
-        };
-
-        Ok(Arc::new(Field::new(
-            self.name(),
-            DataType::Date32,
-            field.is_nullable(),
-        )))
+        Ok(NULLABILITY.return_field(self.name(), DataType::Date32, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()
@@ -150,6 +148,7 @@ mod tests {
     use super::*;
     use crate::function::utils::test::test_scalar_function;
     use arrow::array::Array;
+    use arrow::datatypes::Field;
 
     #[test]
     fn test_last_day_nullability_matches_input() {

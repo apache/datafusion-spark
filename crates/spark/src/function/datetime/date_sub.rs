@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use arrow::array::ArrayRef;
 use arrow::compute;
-use arrow::datatypes::{DataType, Date32Type, Field, FieldRef};
+use arrow::datatypes::{DataType, Date32Type, FieldRef};
 use datafusion_common::cast::{
     as_date32_array, as_int8_array, as_int16_array, as_int32_array,
 };
@@ -17,6 +17,11 @@ use datafusion_expr::{
 };
 use datafusion_functions::utils::make_scalar_function;
 use datafusion_macros::user_doc;
+
+use crate::function::nullability::{SparkNullability, spark_nullability};
+
+/// Spark's `DateSub` is a null-intolerant `BinaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `date_sub` expression.
 ///
@@ -87,13 +92,10 @@ impl ScalarUDFImpl for SparkDateSub {
     }
 
     fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
-        let nullable = args.arg_fields.iter().any(|f| f.is_nullable());
-        Ok(Arc::new(Field::new(
-            self.name(),
-            DataType::Date32,
-            nullable,
-        )))
+        Ok(NULLABILITY.return_field(self.name(), DataType::Date32, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()
@@ -150,6 +152,7 @@ fn spark_date_sub(args: &[ArrayRef]) -> Result<ArrayRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::datatypes::Field;
 
     #[test]
     fn test_date_sub_nullability_non_nullable_args() {

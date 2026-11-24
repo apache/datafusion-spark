@@ -4,11 +4,11 @@
 
 use std::sync::Arc;
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{ArrayRef, ArrowPrimitiveType, AsArray, Int32Array, PrimitiveArray};
 use arrow::compute;
 use arrow::datatypes::{
-    ArrowNativeType, DataType, Field, FieldRef, Int32Type, Int64Type, UInt32Type,
-    UInt64Type,
+    ArrowNativeType, DataType, FieldRef, Int32Type, Int64Type, UInt32Type, UInt64Type,
 };
 use datafusion_common::types::{
     NativeType, logical_int8, logical_int16, logical_int32, logical_int64, logical_uint8,
@@ -179,6 +179,10 @@ enum BitShiftType {
     Right,
     RightUnsigned,
 }
+
+/// Spark's `ShiftLeft`, `ShiftRight` and `ShiftRightUnsigned` are null-intolerant
+/// `BinaryExpression`s.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `shiftleft`, `shiftright` and `shiftrightunsigned` expressions.
 ///
@@ -353,10 +357,11 @@ impl ScalarUDFImpl for SparkBitShift {
     }
 
     fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
-        let nullable = args.arg_fields.iter().any(|f| f.is_nullable());
         let data_type = args.arg_fields[0].data_type().clone();
-        Ok(Arc::new(Field::new(self.name(), data_type, nullable)))
+        Ok(NULLABILITY.return_field(self.name(), data_type, args.arg_fields))
     }
+
+    spark_nullability!(NULLABILITY);
 
     fn documentation(&self) -> Option<&Documentation> {
         match self.bit_shift_type {
@@ -377,6 +382,7 @@ impl ScalarUDFImpl for SparkBitShift {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::datatypes::Field;
 
     #[test]
     fn test_bit_shift_nullability() -> Result<()> {

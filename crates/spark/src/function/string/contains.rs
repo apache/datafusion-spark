@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use crate::function::nullability::{SparkNullability, spark_nullability};
 use arrow::array::{Array, ArrayRef, BooleanArray, Scalar};
 use arrow::compute::kernels::cast::cast;
 use arrow::compute::kernels::comparison::contains as arrow_contains;
@@ -15,6 +16,9 @@ use datafusion_expr::{
     Volatility,
 };
 use datafusion_macros::user_doc;
+
+/// Spark's `Contains` is a null-intolerant `StringPredicate`, a `BinaryExpression`.
+const NULLABILITY: SparkNullability = SparkNullability::null_intolerant();
 
 /// Spark-compatible `contains` expression.
 ///
@@ -155,6 +159,8 @@ impl ScalarUDFImpl for SparkContains {
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
         Ok(DataType::Boolean)
     }
+
+    spark_nullability!(NULLABILITY, return_type);
 
     fn documentation(&self) -> Option<&Documentation> {
         self.doc()
