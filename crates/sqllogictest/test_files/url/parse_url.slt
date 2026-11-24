@@ -341,9 +341,78 @@ SELECT parse_url('http://[::1/path', 'HOST');
 ----
 NULL
 
-# xfail spark: Spark does not range-check the port, so it returns the host for a port above 65535 (https://github.com/apache/datafusion-spark/issues/365)
+# Port above 65535: Spark returns host, authority, etc. (https://github.com/apache/datafusion-spark/issues/365)
 query T
 SELECT parse_url('http://spark.apache.org:99999/path', 'HOST');
+----
+spark.apache.org
+
+query T
+SELECT parse_url('http://spark.apache.org:99999/path', 'AUTHORITY');
+----
+spark.apache.org:99999
+
+query T
+SELECT parse_url('http://spark.apache.org:99999/path', 'PATH');
+----
+/path
+
+query T
+SELECT parse_url('http://[::1]:99999/path', 'AUTHORITY');
+----
+[::1]:99999
+
+# Ordinary hostname with non-numeric port: HOST is NULL, other components preserved
+query T
+SELECT parse_url('http://spark.apache.org:abc/path?query=1', 'HOST');
+----
+NULL
+
+query T
+SELECT parse_url('http://spark.apache.org:abc/path?query=1', 'AUTHORITY');
+----
+spark.apache.org:abc
+
+query T
+SELECT parse_url('http://spark.apache.org:abc/path?query=1', 'PATH');
+----
+/path
+
+# Port exceeding signed 32-bit max (2147483647): HOST is NULL, other components preserved
+query T
+SELECT parse_url('http://spark.apache.org:9999999999/path?query=1', 'HOST');
+----
+NULL
+
+query T
+SELECT parse_url('http://spark.apache.org:9999999999/path', 'AUTHORITY');
+----
+spark.apache.org:9999999999
+
+query T
+SELECT parse_url('http://spark.apache.org:9999999999/path', 'PATH');
+----
+/path
+
+# Userinfo with overflow port
+query T
+SELECT parse_url('http://user:pass@spark.apache.org:99999/path', 'USERINFO');
+----
+user:pass
+
+query T
+SELECT parse_url('http://user:pass@spark.apache.org:99999/path', 'AUTHORITY');
+----
+user:pass@spark.apache.org:99999
+
+query T
+SELECT parse_url('http://user:pass@spark.apache.org:99999/path', 'HOST');
+----
+spark.apache.org
+
+# Bracketed IPv6 with non-numeric port is invalid (returns NULL in legacy mode)
+query T
+SELECT parse_url('http://[::1]:abc/path', 'HOST');
 ----
 NULL
 
@@ -369,9 +438,26 @@ SELECT parse_url('inva lid://spark.apache.org/path?query=1', 'QUERY');
 query error DataFusion error: Execution error: The url is invalid: http://\[::1/path\. Use `try_parse_url` to tolerate invalid URL and return NULL instead\. SQLSTATE: 22P02
 SELECT parse_url('http://[::1/path', 'HOST');
 
-# xfail spark: Spark does not range-check the port, so it returns the host for a port above 65535 (https://github.com/apache/datafusion-spark/issues/365)
-query error DataFusion error: Execution error: The url is invalid: http://spark\.apache\.org:99999/path\. Use `try_parse_url` to tolerate invalid URL and return NULL instead\. SQLSTATE: 22P02
+query T
 SELECT parse_url('http://spark.apache.org:99999/path', 'HOST');
+----
+spark.apache.org
+
+# AUTHORITY in ANSI mode preserves raw overflow port
+query T
+SELECT parse_url('http://spark.apache.org:99999/path', 'AUTHORITY');
+----
+spark.apache.org:99999
+
+# try_parse_url with ANSI mode on succeeds for overflow port
+query T
+SELECT try_parse_url('http://spark.apache.org:99999/path', 'HOST');
+----
+spark.apache.org
+
+# Bracketed IPv6 with non-numeric port errors in ANSI mode
+query error DataFusion error: Execution error: The url is invalid: http://\[::1\]:abc/path\. Use `try_parse_url` to tolerate invalid URL and return NULL instead\. SQLSTATE: 22P02
+SELECT parse_url('http://[::1]:abc/path', 'HOST');
 
 # try_parse_url still returns NULL when ANSI mode is on
 query T
