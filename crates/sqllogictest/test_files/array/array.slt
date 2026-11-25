@@ -72,3 +72,56 @@ query ?
 SELECT array(arrow_cast(array(1,2), 'LargeList(Int64)'), array(3));
 ----
 [[1, 2], [3]]
+
+# The elements are coerced to Spark's `findWiderCommonType`: a string promotes the others
+query ?
+SELECT array(1::INT, 'a');
+----
+[1, a]
+
+query ?
+SELECT array(DATE '2020-01-01', 1::INT, 'a');
+----
+[2020-01-01, 1, a]
+
+query ?
+SELECT array(1::INT, 2.5::DECIMAL(2, 1));
+----
+[1.0, 2.5]
+
+query ?
+SELECT array(array(1::INT), array('a'));
+----
+[[1], [a]]
+
+query error \[DATATYPE_MISMATCH\.DATA_DIFF_TYPES\] Input to `array` should all be the same type, but it's \("INT" or "ARRAY<INT>"\)\. SQLSTATE: 42K09
+SELECT array(1::INT, array(1::INT));
+
+query error \[DATATYPE_MISMATCH\.DATA_DIFF_TYPES\] Input to `array` should all be the same type, but it's \("BOOLEAN" or "STRING"\)\. SQLSTATE: 42K09
+SELECT array(true, 'a');
+
+# With ANSI mode on, a string is cast to the other element's type
+
+statement ok
+set datafusion.execution.enable_ansi_mode = true;
+
+query ?
+SELECT array(1::INT, '2');
+----
+[1, 2]
+
+query ?
+SELECT array('1', 2.5::DECIMAL(2, 1));
+----
+[1.0, 2.5]
+
+query ?
+SELECT array(true, 'false');
+----
+[true, false]
+
+query error \[DATATYPE_MISMATCH\.DATA_DIFF_TYPES\] Input to `array` should all be the same type, but it's \("INT" or "DATE"\)\. SQLSTATE: 42K09
+SELECT array(1::INT, DATE '2020-01-01');
+
+statement ok
+set datafusion.execution.enable_ansi_mode = false;

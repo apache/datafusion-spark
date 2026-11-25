@@ -178,3 +178,59 @@ query R
 SELECT IF(true, 1 / 1, 1 / 0);
 ----
 1
+
+## The branches are coerced to Spark's `findWiderTypeForTwo`
+
+# A string promotes the other branch to a string
+skipif evaluate
+query TT
+SELECT if(true, 1::INT, 'a'), arrow_typeof(if(true, 1::INT, 'a'));
+----
+1 Utf8
+
+# An integer and a decimal widen to a decimal that holds both
+skipif evaluate
+query RT
+SELECT if(true, 1::INT, 2.5::DECIMAL(2, 1)), arrow_typeof(if(true, 1::INT, 2.5::DECIMAL(2, 1)));
+----
+1.0 Decimal128(11, 1)
+
+# A string in an array promotes the other array's elements
+skipif evaluate
+query ?
+SELECT if(true, array(1::INT), array('a'));
+----
+[1]
+
+# BOOLEAN and BINARY do not promote to a string
+skipif evaluate
+query error \[DATATYPE_MISMATCH\.DATA_DIFF_TYPES\] Input to `if` should all be the same type, but it's \["BOOLEAN", "STRING"\]\. SQLSTATE: 42K09
+SELECT if(true, true, 'a');
+
+skipif evaluate
+query error \[DATATYPE_MISMATCH\.DATA_DIFF_TYPES\] Input to `if` should all be the same type, but it's \["INT", "ARRAY<INT>"\]\. SQLSTATE: 42K09
+SELECT if(true, 1::INT, array(1::INT));
+
+# With ANSI mode on, a string is cast to the other branch's type
+
+statement ok
+set datafusion.execution.enable_ansi_mode = true;
+
+skipif evaluate
+query IT
+SELECT if(false, 1::INT, '2'), arrow_typeof(if(false, 1::INT, '2'));
+----
+2 Int64
+
+skipif evaluate
+query BT
+SELECT if(false, true, 'true'), arrow_typeof(if(false, true, 'true'));
+----
+true Boolean
+
+skipif evaluate
+query error \[DATATYPE_MISMATCH\.DATA_DIFF_TYPES\] Input to `if` should all be the same type, but it's \["INT", "DATE"\]\. SQLSTATE: 42K09
+SELECT if(true, 1::INT, DATE '2020-01-01');
+
+statement ok
+set datafusion.execution.enable_ansi_mode = false;

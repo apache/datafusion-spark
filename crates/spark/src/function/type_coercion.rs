@@ -10,9 +10,11 @@
 //! `array_position`. They are not Spark's implicit casts to a function's declared input
 //! types, which the functions do through their [`datafusion_expr::Signature`].
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Fields, IntervalUnit};
+use datafusion_common::{Result, internal_err, plan_err};
 
 /// Spark's `findTightestCommonType`. `ansi_mode` picks between `AnsiTypeCoercion` and
 /// `TypeCoercion`, which differ only in that ANSI widens an integer and a FLOAT to DOUBLE.
@@ -82,10 +84,201 @@ pub(crate) fn wider_type(
         .or_else(|| complex_type(left, right, &|l, r| wider_type(l, r, ansi_mode)))
 }
 
+/// Spark's `findWiderTypeWithoutStringPromotion`: the [`wider_type`] of all `types`, or `None`
+/// if there is none.
+pub(crate) fn find_wider_type_without_string_promotion(
+    types: &[DataType],
+    ansi_mode: bool,
+) -> Option<DataType> {
+    types.iter().try_fold(DataType::Null, |common, t| {
+        wider_type(&common, t, ansi_mode)
+    })
+}
+
+/// Spark's `findWiderTypeForTwo`: the tightest common type, then a decimal wide enough for
+/// both, then promotion of a string to the other type, then the same for the elements of
+/// arrays, the keys and values of maps and the fields of structs. `ansi_mode` picks between
+/// `AnsiTypeCoercion` and `TypeCoercion`, which promote a string differently.
+fn wider_type_with_string_promotion(
+    left: &DataType,
+    right: &DataType,
+    ansi_mode: bool,
+) -> Option<DataType> {
+    tightest_common_type(left, right, ansi_mode)
+        .or_else(|| wider_decimal_type(left, right))
+        .or_else(|| {
+            if ansi_mode {
+                ansi_string_promotion(left, right)
+            } else {
+                string_promotion(left, right)
+            }
+        })
+        .or_else(|| {
+            complex_type(left, right, &|l, r| {
+                wider_type_with_string_promotion(l, r, ansi_mode)
+            })
+        })
+}
+
+/// Spark's `findWiderCommonType`: the common type of all `types`, with strings promoted, or
+/// `None` if there is none.
+pub(crate) fn find_wider_common_type(
+    types: &[DataType],
+    ansi_mode: bool,
+) -> Option<DataType> {
+    let widen = |common: DataType, t: &DataType| {
+        wider_type_with_string_promotion(&common, t, ansi_mode)
+    };
+    if ansi_mode {
+        return types.iter().try_fold(DataType::Null, widen);
+    }
+    // `TypeCoercion` does not widen associatively when a string is involved, so it widens the
+    // distinct types that contain a string first. `(TIMESTAMP, INT, STRING)` is then STRING,
+    // rather than depending on the order of the arguments.
+    let mut ordered: Vec<&DataType> = Vec::with_capacity(types.len());
+    for t in types.iter().filter(|t| has_string_type(t)) {
+        if !ordered.contains(&t) {
+            ordered.push(t);
+        }
+    }
+    ordered.extend(types.iter().filter(|t| !has_string_type(t)));
+    ordered.into_iter().try_fold(DataType::Null, widen)
+}
+
+/// How Spark lists the argument types in a `DATA_DIFF_TYPES` error.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DiffTypesList {
+    /// `["INT", "ARRAY<INT>"]`, as `If` writes it.
+    Bracketed,
+    /// `("INT" or "ARRAY<INT>")`, as `TypeUtils.checkForSameTypeInputExpr` writes it, which
+    /// is what `CreateArray` uses.
+    Alternatives,
+}
+
+/// The argument types for a function whose result type merges the types of the arguments in
+/// `merged`, like a Spark `ComplexTypeMergingExpression`: each of them becomes their
+/// [`find_wider_common_type`], and the other arguments keep their type. Without a common
+/// type, it is Spark's `DATA_DIFF_TYPES` error for the function `name`.
+pub(crate) fn merge_arg_types(
+    name: &str,
+    arg_types: &[DataType],
+    merged: Range<usize>,
+    ansi_mode: bool,
+    list: DiffTypesList,
+) -> Result<Vec<DataType>> {
+    let Some(types) = arg_types.get(merged.clone()) else {
+        return internal_err!(
+            "`{name}` merges the arguments {merged:?}, but it has {} arguments",
+            arg_types.len()
+        );
+    };
+    let Some(common) = find_wider_common_type(types, ansi_mode) else {
+        let types = types
+            .iter()
+            .map(|t| format!("\"{}\"", spark_sql_type(t)))
+            .collect::<Vec<_>>();
+        let types = match list {
+            DiffTypesList::Bracketed => format!("[{}]", types.join(", ")),
+            DiffTypesList::Alternatives => format!("({})", types.join(" or ")),
+        };
+        return plan_err!(
+            "[DATATYPE_MISMATCH.DATA_DIFF_TYPES] Input to `{name}` should all be the same \
+             type, but it's {types}. SQLSTATE: 42K09"
+        );
+    };
+    let mut arg_types = arg_types.to_vec();
+    arg_types[merged].fill(common);
+    Ok(arg_types)
+}
+
+/// Spark's `hasStringType`: whether the type is a string or an array of them.
+fn has_string_type(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::List(f) | DataType::LargeList(f) | DataType::FixedSizeList(f, _) => {
+            has_string_type(f.data_type())
+        }
+        other => value_type(other).is_string(),
+    }
+}
+
+/// Spark has no dictionary-encoded types, so one is its value type.
+fn value_type(data_type: &DataType) -> &DataType {
+    match data_type {
+        DataType::Dictionary(_, value) => value_type(value),
+        other => other,
+    }
+}
+
+/// Whether the type is one of Spark's `AtomicType`s, which is every type but `NULL`, an
+/// array, map or struct, and a `CalendarIntervalType`.
+fn is_atomic(data_type: &DataType) -> bool {
+    use DataType::*;
+    matches!(
+        data_type,
+        Boolean
+            | Int8
+            | Int16
+            | Int32
+            | Int64
+            | Float32
+            | Float64
+            | Decimal128(_, _)
+            | Utf8
+            | LargeUtf8
+            | Utf8View
+            | Binary
+            | LargeBinary
+            | BinaryView
+            | Date32
+            | Timestamp(_, _)
+            | Time64(_)
+            | Interval(IntervalUnit::YearMonth)
+            | Duration(_)
+    )
+}
+
+/// Spark's `TypeCoercion.stringPromotion`: a string and any other atomic type but `BOOLEAN`
+/// and `BINARY` promote to the string.
+fn string_promotion(left: &DataType, right: &DataType) -> Option<DataType> {
+    let (left, right) = (value_type(left), value_type(right));
+    match (left, right) {
+        (string, other) | (other, string)
+            if string.is_string()
+                && is_atomic(other)
+                && !is_binary(other)
+                && *other != DataType::Boolean =>
+        {
+            Some(string.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Spark's `AnsiStringPromotionTypeCoercion.findWiderTypeForString`: a string promotes to
+/// BIGINT with an integer, to DOUBLE with a floating-point number or a decimal, and to the
+/// type of any other atomic type, except an interval, which has none.
+fn ansi_string_promotion(left: &DataType, right: &DataType) -> Option<DataType> {
+    use DataType::*;
+    let (left, right) = (value_type(left), value_type(right));
+    let other = match (left.is_string(), right.is_string()) {
+        (true, false) => right,
+        (false, true) => left,
+        _ => return None,
+    };
+    match other {
+        Int8 | Int16 | Int32 | Int64 => Some(Int64),
+        Float32 | Float64 | Decimal128(_, _) => Some(Float64),
+        Interval(_) | Duration(_) => None,
+        other if is_atomic(other) => Some(other.clone()),
+        _ => None,
+    }
+}
+
 /// Spark's `findWiderTypeForDecimal`, with `DecimalType.boundedPreferIntegralDigits`, which
 /// gives up fractional digits rather than integral ones when the precision exceeds 38.
 fn wider_decimal_type(left: &DataType, right: &DataType) -> Option<DataType> {
     use DataType::*;
+    let (left, right) = (value_type(left), value_type(right));
     let (p1, s1, p2, s2) = match (left, right) {
         (Decimal128(p1, s1), Decimal128(p2, s2)) => {
             (*p1 as i16, *s1 as i16, *p2 as i16, *s2 as i16)
@@ -189,10 +382,12 @@ fn complex_type(
 }
 
 /// Spark's `Cast.forceNullable`, for the casts that these rules produce. Of those, Spark
-/// marks only DATE to TIMESTAMP_NTZ as one that can return NULL.
+/// marks only DATE to TIMESTAMP_NTZ, and a string to anything but a string or binary, which
+/// is how ANSI promotes a string, as ones that can return NULL.
 fn force_nullable(from: &DataType, to: &DataType) -> bool {
     match from {
         DataType::Dictionary(_, value) => force_nullable(value, to),
+        _ if from.is_string() => !to.is_string() && !is_binary(to),
         _ => matches!((from, to), (DataType::Date32, DataType::Timestamp(_, None))),
     }
 }
@@ -576,5 +771,162 @@ mod tests {
         assert!(!is_orderable(&list(interval.clone())));
         assert!(is_orderable(&list(Int32)));
         assert_eq!(spark_sql_type(&list(interval)), "ARRAY<INTERVAL>");
+    }
+
+    fn timestamp() -> DataType {
+        Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)
+    }
+
+    #[test]
+    fn strings_promote_to_the_other_type_unless_it_is_boolean_or_binary() {
+        let widen = |l: &DataType, r: &DataType| {
+            find_wider_common_type(&[l.clone(), r.clone()], false)
+        };
+        assert_eq!(widen(&Int32, &Utf8), Some(Utf8));
+        assert_eq!(widen(&Utf8, &Float64), Some(Utf8));
+        assert_eq!(widen(&Date32, &Utf8View), Some(Utf8View));
+        assert_eq!(widen(&Boolean, &Utf8), None);
+        assert_eq!(widen(&Utf8, &Binary), None);
+        assert_eq!(widen(&Utf8, &list(Utf8)), None);
+    }
+
+    #[test]
+    fn ansi_promotes_a_string_to_the_other_type() {
+        let widen = |l: &DataType, r: &DataType| {
+            find_wider_common_type(&[l.clone(), r.clone()], true)
+        };
+        assert_eq!(widen(&Int32, &Utf8), Some(Int64));
+        assert_eq!(widen(&Utf8, &Int8), Some(Int64));
+        assert_eq!(widen(&Float32, &Utf8), Some(Float64));
+        assert_eq!(widen(&Decimal128(10, 2), &Utf8), Some(Float64));
+        assert_eq!(widen(&Boolean, &Utf8), Some(Boolean));
+        assert_eq!(widen(&Utf8, &Binary), Some(Binary));
+        assert_eq!(widen(&Date32, &Utf8), Some(Date32));
+        assert_eq!(widen(&Utf8, &timestamp()), Some(timestamp()));
+        assert_eq!(widen(&Utf8, &Interval(IntervalUnit::YearMonth)), None);
+        assert_eq!(widen(&Utf8, &Interval(IntervalUnit::MonthDayNano)), None);
+        assert_eq!(widen(&Utf8, &list(Int32)), None);
+    }
+
+    #[test]
+    fn strings_are_widened_before_other_types_unless_ansi() {
+        let types = [timestamp(), Int32, Utf8];
+        let mut reversed = types.clone();
+        reversed.reverse();
+        for types in [&types, &reversed] {
+            assert_eq!(find_wider_common_type(types, false), Some(Utf8));
+        }
+        // ANSI casts the string to each type in turn, so the order matters.
+        assert_eq!(find_wider_common_type(&types, true), None);
+        assert_eq!(
+            find_wider_common_type(&[Int32, Utf8, Float64], true),
+            Some(Float64)
+        );
+    }
+
+    #[test]
+    fn nested_types_promote_strings_by_element() {
+        let types = [list(Int32), list(Utf8)];
+        assert_eq!(find_wider_common_type(&types, false), Some(list(Utf8)));
+        assert_eq!(find_wider_common_type(&types, true), Some(list(Int64)));
+        let types = [map(Int32, Int32), map(Int32, Utf8)];
+        assert_eq!(
+            find_wider_common_type(&types, false),
+            Some(map(Int32, Utf8))
+        );
+        // A map key cannot become NULL, so a string key does not promote in ANSI mode.
+        let types = [map(Int32, Int32), map(Utf8, Int32)];
+        assert_eq!(
+            find_wider_common_type(&types, false),
+            Some(map(Utf8, Int32))
+        );
+        assert_eq!(find_wider_common_type(&types, true), None);
+    }
+
+    #[test]
+    fn dictionaries_are_their_value_type() {
+        let dictionary = Dictionary(Box::new(Int8), Box::new(Utf8));
+        assert_eq!(
+            find_wider_common_type(&[dictionary.clone(), Int32], false),
+            Some(Utf8)
+        );
+        assert_eq!(
+            find_wider_common_type(&[Int32, dictionary], true),
+            Some(Int64)
+        );
+        let decimal = Dictionary(Box::new(Int8), Box::new(Decimal128(2, 1)));
+        assert_eq!(
+            find_wider_common_type(&[Int32, decimal], false),
+            Some(Decimal128(11, 1))
+        );
+    }
+
+    #[test]
+    fn the_wider_common_type_of_no_types_or_only_nulls_is_null() {
+        assert_eq!(find_wider_common_type(&[], false), Some(Null));
+        assert_eq!(find_wider_common_type(&[Null, Null], true), Some(Null));
+        assert_eq!(find_wider_common_type(&[Null, Int32], true), Some(Int32));
+    }
+
+    #[test]
+    fn the_wider_type_without_string_promotion_keeps_strings_apart() {
+        let widen =
+            |types: &[DataType]| find_wider_type_without_string_promotion(types, false);
+        assert_eq!(widen(&[Int32, Utf8]), None);
+        assert_eq!(widen(&[Int32, Decimal128(2, 1)]), Some(Decimal128(11, 1)));
+        assert_eq!(widen(&[Int32, Int64, Float32]), Some(Float32));
+        assert_eq!(widen(&[]), Some(Null));
+    }
+
+    #[test]
+    fn merging_leaves_the_other_arguments_alone() {
+        let merged = merge_arg_types(
+            "f",
+            &[Boolean, Int32, Float64, Null],
+            1..4,
+            false,
+            DiffTypesList::Bracketed,
+        )
+        .unwrap();
+        assert_eq!(merged, vec![Boolean, Float64, Float64, Float64]);
+        let merged =
+            merge_arg_types("f", &[], 0..0, false, DiffTypesList::Alternatives).unwrap();
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn merging_without_a_common_type_is_spark_s_data_diff_types_error() {
+        let arg_types = [Boolean, Int32, list(Int32)];
+        let error =
+            merge_arg_types("if", &arg_types, 1..3, false, DiffTypesList::Bracketed)
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains(
+                "[DATATYPE_MISMATCH.DATA_DIFF_TYPES] Input to `if` should all be the same \
+                 type, but it's [\"INT\", \"ARRAY<INT>\"]. SQLSTATE: 42K09"
+            ),
+            "{error}"
+        );
+        let error = merge_arg_types(
+            "array",
+            &arg_types[1..],
+            0..2,
+            true,
+            DiffTypesList::Alternatives,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(
+                "Input to `array` should all be the same type, but it's \
+                 (\"INT\" or \"ARRAY<INT>\"). SQLSTATE: 42K09"
+            ),
+            "{error}"
+        );
+        assert!(
+            merge_arg_types("f", &arg_types, 2..4, false, DiffTypesList::Bracketed)
+                .is_err()
+        );
     }
 }

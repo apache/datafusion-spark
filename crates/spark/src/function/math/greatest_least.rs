@@ -19,7 +19,9 @@
 //! number with a string. Spark rejects that.
 
 use crate::function::float_normalize::{contains_float, normalize_array};
-use crate::function::type_coercion::{is_orderable, spark_sql_type, wider_type};
+use crate::function::type_coercion::{
+    find_wider_type_without_string_promotion, is_orderable, spark_sql_type,
+};
 use arrow::array::{
     Array, ArrayRef, ArrowPrimitiveType, AsArray, BooleanArray, Datum, Scalar,
     make_comparator, new_null_array,
@@ -261,12 +263,7 @@ impl GreatestLeast {
     /// orderable.
     fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
         self.check_arg_count(arg_types.len(), true)?;
-        let common = arg_types
-            .iter()
-            .skip(1)
-            .try_fold(arg_types[0].clone(), |common, data_type| {
-                wider_type(&common, data_type, self.ansi_mode)
-            });
+        let common = find_wider_type_without_string_promotion(arg_types, self.ansi_mode);
         let Some(common) = common else {
             return plan_err!(
                 "[DATATYPE_MISMATCH.DATA_DIFF_TYPES] Input to `{}` should all be the same \

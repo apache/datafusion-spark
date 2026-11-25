@@ -3,12 +3,15 @@
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
 use arrow::datatypes::DataType;
+use datafusion_common::config::ConfigOptions;
 use datafusion_common::{Result, internal_err, plan_err};
 use datafusion_expr::{
-    ColumnarValue, Documentation, Expr, ScalarFunctionArgs, ScalarUDFImpl, Signature,
-    Volatility, binary::try_type_union_resolution, simplify::ExprSimplifyResult, when,
+    ColumnarValue, Documentation, Expr, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
+    Signature, Volatility, simplify::ExprSimplifyResult, when,
 };
 use datafusion_macros::user_doc;
+
+use crate::function::type_coercion::{DiffTypesList, merge_arg_types};
 
 /// Spark-compatible `if` expression.
 ///
@@ -45,6 +48,9 @@ no
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SparkIf {
     signature: Signature,
+    /// Whether to coerce the branches as Spark's `AnsiTypeCoercion` does, rather than
+    /// `TypeCoercion`.
+    ansi_mode: bool,
 }
 
 impl Default for SparkIf {
@@ -55,8 +61,15 @@ impl Default for SparkIf {
 
 impl SparkIf {
     pub fn new() -> Self {
+        Self::new_with_ansi_mode(false)
+    }
+
+    /// Creates an `if` that coerces its branches as Spark does with
+    /// `datafusion.execution.enable_ansi_mode` set to `ansi_mode`.
+    fn new_with_ansi_mode(ansi_mode: bool) -> Self {
         Self {
             signature: Signature::user_defined(Volatility::Immutable),
+            ansi_mode,
         }
     }
 }
@@ -85,10 +98,22 @@ impl ScalarUDFImpl for SparkIf {
             );
         }
 
-        let target_types = try_type_union_resolution(&arg_types[1..])?;
-        let mut result = vec![DataType::Boolean];
-        result.extend(target_types);
-        Ok(result)
+        // Spark's `IfTypeCoercion` casts both branches to their `findWiderTypeForTwo`.
+        let mut target_types = merge_arg_types(
+            self.name(),
+            arg_types,
+            1..3,
+            self.ansi_mode,
+            DiffTypesList::Bracketed,
+        )?;
+        target_types[0] = DataType::Boolean;
+        Ok(target_types)
+    }
+
+    fn with_updated_config(&self, config: &ConfigOptions) -> Option<ScalarUDF> {
+        let ansi_mode = config.execution.enable_ansi_mode;
+        (ansi_mode != self.ansi_mode)
+            .then(|| ScalarUDF::from(Self::new_with_ansi_mode(ansi_mode)))
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {

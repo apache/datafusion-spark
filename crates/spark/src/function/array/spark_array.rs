@@ -6,16 +6,18 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, new_null_array};
 use arrow::datatypes::{DataType, Field, FieldRef};
+use datafusion_common::config::ConfigOptions;
 use datafusion_common::utils::SingleRowListArrayBuilder;
 use datafusion_common::{Result, internal_err};
 use datafusion_expr::{
-    ColumnarValue, Documentation, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl,
-    Signature, Volatility,
+    ColumnarValue, Documentation, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF,
+    ScalarUDFImpl, Signature, Volatility,
 };
-use datafusion_functions_nested::make_array::{array_array, coerce_types_inner};
+use datafusion_functions_nested::make_array::array_array;
 use datafusion_macros::user_doc;
 
 use crate::function::functions_nested_utils::make_scalar_function;
+use crate::function::type_coercion::{DiffTypesList, merge_arg_types};
 
 const ARRAY_FIELD_DEFAULT_NAME: &str = "element";
 
@@ -44,6 +46,9 @@ const ARRAY_FIELD_DEFAULT_NAME: &str = "element";
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SparkArray {
     signature: Signature,
+    /// Whether to coerce the elements as Spark's `AnsiTypeCoercion` does, rather than
+    /// `TypeCoercion`.
+    ansi_mode: bool,
 }
 
 impl Default for SparkArray {
@@ -54,8 +59,15 @@ impl Default for SparkArray {
 
 impl SparkArray {
     pub fn new() -> Self {
+        Self::new_with_ansi_mode(false)
+    }
+
+    /// Creates an `array` that coerces its elements as Spark does with
+    /// `datafusion.execution.enable_ansi_mode` set to `ansi_mode`.
+    fn new_with_ansi_mode(ansi_mode: bool) -> Self {
         Self {
             signature: Signature::user_defined(Volatility::Immutable),
+            ansi_mode,
         }
     }
 }
@@ -112,11 +124,19 @@ impl ScalarUDFImpl for SparkArray {
     }
 
     fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
-        if arg_types.is_empty() {
-            Ok(vec![])
-        } else {
-            coerce_types_inner(arg_types, self.name())
-        }
+        merge_arg_types(
+            self.name(),
+            arg_types,
+            0..arg_types.len(),
+            self.ansi_mode,
+            DiffTypesList::Alternatives,
+        )
+    }
+
+    fn with_updated_config(&self, config: &ConfigOptions) -> Option<ScalarUDF> {
+        let ansi_mode = config.execution.enable_ansi_mode;
+        (ansi_mode != self.ansi_mode)
+            .then(|| ScalarUDF::from(Self::new_with_ansi_mode(ansi_mode)))
     }
 }
 
