@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+use crate::function::float_normalize::normalize_floats;
 use arrow::array::{
     Array, AsArray, BooleanArray, BooleanBufferBuilder, GenericListArray, OffsetSizeTrait,
 };
@@ -22,6 +23,10 @@ use std::sync::Arc;
 ///   return `null` (because the element might have been the null).
 /// - If the result is `false` and the input array row has no null elements,
 ///   return `false`.
+///
+/// Spark compares floating point elements with `-0.0 == 0.0` and `NaN == NaN`,
+/// while `array_has` compares them by their bits. Both arguments are therefore
+/// normalized first, at any depth of list and struct elements.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SparkArrayContains {
     signature: Signature,
@@ -54,7 +59,10 @@ impl ScalarUDFImpl for SparkArrayContains {
         Ok(DataType::Boolean)
     }
 
-    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+    fn invoke_with_args(&self, mut args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        for arg in &mut args.args {
+            *arg = normalize_floats(arg)?;
+        }
         let haystack = args.args[0].clone();
         let array_has_result = array_has_udf().invoke_with_args(args)?;
 
@@ -146,5 +154,44 @@ fn mask_with_list_nulls(
     match list_nulls {
         Some(n) => &buf & n.inner(),
         None => buf,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{FixedSizeListArray, Float64Array};
+    use arrow::datatypes::Field;
+    use datafusion_common::ScalarValue;
+
+    #[test]
+    fn zero_width_fixed_size_list_keeps_its_row() {
+        // One valid row of a zero-width list, without a null buffer to infer the length from.
+        let field = Arc::new(Field::new("item", DataType::Float64, true));
+        let haystack = FixedSizeListArray::try_new_with_length(
+            Arc::clone(&field),
+            0,
+            Arc::new(Float64Array::from(Vec::<f64>::new())),
+            None,
+            1,
+        )
+        .unwrap();
+        assert_eq!(haystack.len(), 1);
+
+        let result = SparkArrayContains::new()
+            .invoke_with_args(ScalarFunctionArgs {
+                args: vec![
+                    ColumnarValue::Array(Arc::new(haystack)),
+                    ColumnarValue::Scalar(ScalarValue::Float64(Some(1.0))),
+                ],
+                arg_fields: vec![],
+                number_rows: 1,
+                return_field: Arc::new(Field::new("result", DataType::Boolean, true)),
+                config_options: Default::default(),
+            })
+            .unwrap()
+            .to_array(1)
+            .unwrap();
+        assert_eq!(result.as_boolean(), &BooleanArray::from(vec![Some(false)]));
     }
 }

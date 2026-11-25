@@ -24,7 +24,8 @@ errors, ...). This crate is useful when you are:
 - running SQL migrated from Spark on DataFusion.
 
 Not every Spark function is implemented yet. Progress is tracked in the
-[`datafusion-spark` epic]; see the [API documentation] for the functions available today.
+[`datafusion-spark` epic]. See the [function reference] for the documented functions, with
+descriptions, arguments and examples, and the [API documentation] for the Rust API.
 
 ## Quick start
 
@@ -34,6 +35,13 @@ Add the crate with the `core` feature, which provides the `SessionStateBuilderSp
 [dependencies]
 datafusion = "56"
 datafusion-spark = { version = "56", features = ["core"] }
+```
+
+Add the `sql` feature as well to enable the Spark planner rewrites. That is what gives operators such
+as `/` their Spark semantics (both sides cast to `DOUBLE`, and a zero divisor returns `NULL`):
+
+```toml
+datafusion-spark = { version = "56", features = ["core", "sql"] }
 ```
 
 Enable Spark features on a session. Call `with_spark_features` **after** `with_default_features`, since
@@ -66,17 +74,23 @@ use datafusion_spark::expr_fn::sha2;
 let expr = sha2(col("my_data"), lit(256));
 ```
 
-## Using the DataFusion CLI
+## Trying the functions in a SQL shell
 
-Pass `--spark` to `datafusion-cli` to enable the Spark SQL dialect and register
-the Spark-compatible scalar, aggregate, and window functions for the session:
+`datafusion-spark-cli` is the DataFusion CLI with the Spark SQL dialect enabled
+and the Spark-compatible scalar, aggregate, and window functions registered. It
+lives in [`crates/cli`](../cli) in this repository and is not published yet:
 
 ```shell
-datafusion-cli --spark
+cargo run -p datafusion-spark-cli
 ```
 
-The option is disabled by default because Spark-compatible functions can
-override DataFusion functions with the same name.
+The Spark functions override DataFusion functions with the same name. ANSI mode
+is on by default, as in Spark 4. Pass `--ansi false` for Spark's legacy behavior,
+after `--` so that `cargo` passes it to the CLI:
+
+```shell
+cargo run -p datafusion-spark-cli -- --ansi false
+```
 
 ## Things to know
 
@@ -95,4 +109,5 @@ and the [DataFusion contributor guide](https://datafusion.apache.org/contributor
 [apache spark]: https://spark.apache.org/
 [apache datafusion comet]: https://datafusion.apache.org/comet/
 [api documentation]: https://docs.rs/datafusion-spark
+[function reference]: https://github.com/apache/datafusion-spark/blob/main/docs/functions/README.md
 [`datafusion-spark` epic]: https://github.com/apache/datafusion/issues/15914

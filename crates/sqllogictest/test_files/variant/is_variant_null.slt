@@ -1,0 +1,171 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
+# SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
+
+# Tests for Spark-compatible is_variant_null
+# Reference: https://spark.apache.org/docs/latest/api/sql/index.html#is_variant_null
+# Spark 4.0.0 added it. The expected values were checked on Spark 4.2.0 only.
+#
+# This crate has no `parse_json` yet, so a VARIANT is built as the struct of the
+# Arrow `arrow.parquet.variant` type: `named_struct('metadata', ..., 'value', ...)`,
+# with a minimal valid metadata (version 1, an empty dictionary) of X'010000'.
+# Spark has no `named_struct` that is a VARIANT, so the records that build one are
+# marked `skipif spark`. Their expected values were checked on Spark 4.2.0 by
+# building the same bytes with PySpark's `VariantVal(value, metadata)`, and with
+# `parse_json`, for example `is_variant_null(parse_json('null'))` is true and
+# `is_variant_null(parse_json('13'))` is false. That covers every record below
+# except the one marked as having no Spark equivalent. It includes all 256 values of
+# a one-byte `value`: only X'00' is true, and none of them raises an error, so a
+# header with an unknown type id such as X'7C' is false.
+#
+# The `value` bytes below are Spark's variant encoding. The first byte is the header:
+#   X'00'                 null
+#   X'04' / X'08'         true / false
+#   X'0C0D'               the 8-bit integer 13
+#   X'01'                 the empty string
+#   X'116E756C6C'         the string "null", which is not a variant null
+#   X'030000'             the empty array []
+#   X'03020001020000'     the array [null, null]
+#   X'020000'             the empty object {}
+
+# A NULL literal is a SQL NULL, which is not a variant null (and the result is not NULL)
+query B
+SELECT is_variant_null(NULL);
+----
+false
+
+# A variant null is a JSON null stored in a VARIANT
+skipif spark
+query B
+SELECT is_variant_null(named_struct('metadata', X'010000', 'value', X'00'));
+----
+true
+
+# Every other value is false: strings, numbers, booleans, arrays and objects
+skipif spark
+query BBBBBBBBB
+SELECT
+  is_variant_null(named_struct('metadata', X'010000', 'value', X'116E756C6C')),
+  is_variant_null(named_struct('metadata', X'010000', 'value', X'01')),
+  is_variant_null(named_struct('metadata', X'010000', 'value', X'0C0D')),
+  is_variant_null(named_struct('metadata', X'010000', 'value', X'0C00')),
+  is_variant_null(named_struct('metadata', X'010000', 'value', X'04')),
+  is_variant_null(named_struct('metadata', X'010000', 'value', X'08')),
+  is_variant_null(named_struct('metadata', X'010000', 'value', X'030000')),
+  is_variant_null(named_struct('metadata', X'010000', 'value', X'03020001020000')),
+  is_variant_null(named_struct('metadata', X'010000', 'value', X'020000'));
+----
+false false false false false false false false false
+
+# Header bytes with an unknown type id or basic type are not variant nulls and do
+# not raise an error, as in Spark
+skipif spark
+query BBB
+SELECT
+  is_variant_null(named_struct('metadata', X'010000', 'value', X'7C')),
+  is_variant_null(named_struct('metadata', X'010000', 'value', X'80')),
+  is_variant_null(named_struct('metadata', X'010000', 'value', X'FF'));
+----
+false false false
+
+# The metadata is ignored. Spark does not validate it either: an empty metadata or
+# one with a bad version byte does not raise MALFORMED_VARIANT in is_variant_null.
+skipif spark
+query BB
+SELECT
+  is_variant_null(named_struct('metadata', X'', 'value', X'00')),
+  is_variant_null(named_struct('metadata', X'0101000103616263', 'value', X'0C0D'));
+----
+true false
+
+# Column input, with a SQL NULL VARIANT and a variant null in the same column
+skipif spark
+query IB
+SELECT i, is_variant_null(v) FROM (
+  SELECT i, CASE WHEN i = 3 THEN NULL
+                 WHEN i = 1 THEN named_struct('metadata', X'010000', 'value', X'00')
+                 ELSE named_struct('metadata', X'010000', 'value', X'0C0D') END AS v
+  FROM (VALUES (1), (2), (3)) AS t(i)
+) ORDER BY i;
+----
+1 true
+2 false
+3 false
+
+# A NULL `value` in a VARIANT that is not NULL holds no value, which is false.
+# No Spark equivalent: Spark cannot build such a VARIANT (a VariantVal with a NULL
+# value fails with a NullPointerException), so this is DataFusion-only behavior. In
+# a shredded VARIANT the value is then in `typed_value`, which is not a variant null.
+skipif spark
+query B
+SELECT is_variant_null(named_struct('metadata', X'010000', 'value', NULL::BINARY));
+----
+false
+
+# An empty `value` is malformed. The message is Spark 4.2.0's, byte for byte.
+skipif spark
+query error \[MALFORMED_VARIANT\] Variant binary is malformed\. Please check the data source is valid\. SQLSTATE: 22023
+SELECT is_variant_null(named_struct('metadata', X'010000', 'value', X''));
+
+# ... also in a column, where it raises for the whole query even next to valid rows
+skipif spark
+query error \[MALFORMED_VARIANT\]
+SELECT is_variant_null(v) FROM (
+  SELECT CASE WHEN i = 1 THEN named_struct('metadata', X'010000', 'value', X'00')
+              ELSE named_struct('metadata', X'010000', 'value', X'') END AS v
+  FROM (VALUES (1), (2)) AS t(i)
+);
+
+# An empty `value` in a SQL NULL VARIANT is not read
+skipif spark
+query B
+SELECT is_variant_null(CASE WHEN i = 1 THEN NULL ELSE named_struct('metadata', X'010000', 'value', X'') END)
+FROM (VALUES (1)) AS t(i);
+----
+false
+
+# Large binary and binary view fields give the same result
+skipif spark
+query BB
+SELECT
+  is_variant_null(named_struct('metadata', arrow_cast(X'010000', 'LargeBinary'), 'value', arrow_cast(X'00', 'LargeBinary'))),
+  is_variant_null(named_struct('metadata', arrow_cast(X'010000', 'BinaryView'), 'value', arrow_cast(X'0C0D', 'BinaryView')));
+----
+true false
+
+# The result does not depend on ANSI mode
+statement ok
+set datafusion.execution.enable_ansi_mode = true;
+
+skipif spark
+query B
+SELECT is_variant_null(named_struct('metadata', X'010000', 'value', X'00'));
+----
+true
+
+query B
+SELECT is_variant_null(NULL);
+----
+false
+
+statement ok
+set datafusion.execution.enable_ansi_mode = false;
+
+# Only a VARIANT is accepted, with no implicit casts. Spark rejects these types too.
+statement error expects a VARIANT argument
+SELECT is_variant_null('null');
+
+statement error expects a VARIANT argument
+SELECT is_variant_null(1);
+
+statement error expects a VARIANT argument
+SELECT is_variant_null(X'00');
+
+statement error expects a VARIANT argument
+SELECT is_variant_null(named_struct('metadata', X'010000', 'value', 'null'));
+
+statement error expects a VARIANT argument
+SELECT is_variant_null(named_struct('value', X'00'));
+
+statement error expects exactly one argument
+SELECT is_variant_null(NULL, NULL);

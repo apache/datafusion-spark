@@ -2,21 +2,31 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+//! Spark date and time functions, such as `date_add`, `date_diff`, `date_trunc`,
+//! `last_day`, `make_interval` and `to_utc_timestamp`.
+
 pub mod add_months;
 pub mod date_add;
 pub mod date_diff;
+pub mod date_from_unix_date;
 pub mod date_part;
+mod date_part_name;
 pub mod date_sub;
 pub mod date_trunc;
+pub mod dayname;
+pub mod dayofweek;
 pub mod extract;
 pub mod from_utc_timestamp;
 pub mod last_day;
+pub mod make_date;
 pub mod make_dt_interval;
 pub mod make_interval;
+pub mod make_time;
 pub mod monthname;
 pub mod next_day;
 pub mod time_trunc;
-mod timezone;
+pub mod timestamp_micros;
+pub(crate) mod timezone;
 pub mod to_utc_timestamp;
 pub mod trunc;
 pub mod unix;
@@ -29,9 +39,15 @@ use std::sync::Arc;
 make_udf_function!(add_months::SparkAddMonths, add_months);
 make_udf_function!(date_add::SparkDateAdd, date_add);
 make_udf_function!(date_diff::SparkDateDiff, date_diff);
+make_udf_function!(
+    date_from_unix_date::SparkDateFromUnixDate,
+    date_from_unix_date
+);
 make_udf_function!(date_part::SparkDatePart, date_part);
 make_udf_function!(date_sub::SparkDateSub, date_sub);
 make_udf_function!(date_trunc::SparkDateTrunc, date_trunc);
+make_udf_function!(dayname::SparkDayName, dayname);
+make_udf_function!(dayofweek::SparkDayOfWeek, dayofweek);
 make_udf_function!(
     from_utc_timestamp::SparkFromUtcTimestamp,
     from_utc_timestamp
@@ -40,11 +56,14 @@ make_udf_function!(extract::SparkHour, hour);
 make_udf_function!(extract::SparkMinute, minute);
 make_udf_function!(extract::SparkSecond, second);
 make_udf_function!(last_day::SparkLastDay, last_day);
+make_udf_function!(make_date::SparkMakeDate, make_date);
 make_udf_function!(make_dt_interval::SparkMakeDtInterval, make_dt_interval);
 make_udf_function!(make_interval::SparkMakeInterval, make_interval);
+make_udf_function!(make_time::SparkMakeTime, make_time);
 make_udf_function!(monthname::SparkMonthName, monthname);
 make_udf_function!(next_day::SparkNextDay, next_day);
 make_udf_function!(time_trunc::SparkTimeTrunc, time_trunc);
+make_udf_function!(timestamp_micros::SparkTimestampMicros, timestamp_micros);
 make_udf_function!(to_utc_timestamp::SparkToUtcTimestamp, to_utc_timestamp);
 make_udf_function!(trunc::SparkTrunc, trunc);
 make_udf_function!(unix::SparkUnixDate, unix_date);
@@ -100,14 +119,34 @@ pub mod expr_fn {
         arg1
     ));
     export_functions!((
+        make_date,
+        "Creates a date from `year`, `month` and `day` fields.",
+        year month day
+    ));
+    export_functions!((
         make_dt_interval,
         "Make a day time interval from given days, hours, mins and secs (return type is actually a Duration(Microsecond))",
          days hours mins secs
     ));
     export_functions!((
+        dayname,
+        "Returns the three-letter abbreviated day name from a date.",
+        arg1
+    ));
+    export_functions!((
+        dayofweek,
+        "Returns the day of the week for date/timestamp as an integer where Sunday = 1, Monday = 2, ..., Saturday = 7.",
+        arg1
+    ));
+    export_functions!((
         make_interval,
         "Make interval from years, months, weeks, days, hours, mins and secs.",
         years months weeks days hours mins secs
+    ));
+    export_functions!((
+        make_time,
+        "Create a time from hour, minute and second fields.",
+        hour minute second
     ));
     export_functions!((
         monthname,
@@ -125,6 +164,11 @@ pub mod expr_fn {
         date_diff,
         "Returns the number of days from start `start` to end `end`.",
         end start
+    ));
+    export_functions!((
+        date_from_unix_date,
+        "Creates a date from the number of days `days` since 1970-01-01.",
+        days
     ));
     export_functions!((
         date_trunc,
@@ -150,6 +194,11 @@ pub mod expr_fn {
         from_utc_timestamp,
         "Interpret a given timestamp `ts` in UTC timezone and then convert it to timezone `tz`.",
         ts tz
+    ));
+    export_functions!((
+        timestamp_micros,
+        "Creates a timestamp from microseconds since the UTC epoch.",
+        microseconds
     ));
     export_functions!((
         to_utc_timestamp,
@@ -188,19 +237,25 @@ pub fn functions() -> Vec<Arc<ScalarUDF>> {
         add_months(),
         date_add(),
         date_diff(),
+        date_from_unix_date(),
         date_part(),
         date_sub(),
         date_trunc(),
+        dayname(),
+        dayofweek(),
         from_utc_timestamp(),
         hour(),
         last_day(),
+        make_date(),
         make_dt_interval(),
         make_interval(),
+        make_time(),
         minute(),
         monthname(),
         next_day(),
         second(),
         time_trunc(),
+        timestamp_micros(),
         to_utc_timestamp(),
         trunc(),
         unix_date(),

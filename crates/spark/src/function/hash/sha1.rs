@@ -10,21 +10,43 @@ use datafusion_common::cast::{
     as_binary_array, as_binary_view_array, as_fixed_size_binary_array,
     as_large_binary_array,
 };
-use datafusion_common::types::{NativeType, logical_string};
+use datafusion_common::config::ConfigOptions;
 use datafusion_common::utils::hex::{HexCase, encode_bytes_into};
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, internal_err};
 use datafusion_expr::{
-    Coercion, ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl,
-    Signature, TypeSignatureClass, Volatility,
+    ColumnarValue, Documentation, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF,
+    ScalarUDFImpl, Signature, Volatility,
 };
 use datafusion_functions::utils::make_scalar_function;
+use datafusion_macros::user_doc;
 use sha1::{Digest, Sha1};
 
+use crate::function::implicit_cast::{SparkInputType, SparkInputTypes};
+
+/// Spark-compatible `sha1` expression.
+///
 /// <https://spark.apache.org/docs/latest/api/sql/index.html#sha1>
+#[user_doc(
+    doc_section(label = "Hashing Functions"),
+    description = "Returns the SHA-1 digest of the input as a 40-character lowercase hex string. \
+        DataFusion has no built-in `sha1`.",
+    syntax_example = "sha1(expr)",
+    alternative_syntax = "sha(expr)",
+    sql_example = r#"```sql
+> SELECT sha1('Spark');
+85f5955f4b27a9a4c2aab6ffe5d7189fc298b92c
+> SELECT sha1(NULL);
+NULL
+```"#,
+    argument(
+        name = "expr",
+        description = "String or binary expression to hash. Strings are hashed as UTF-8 bytes. NULL returns NULL."
+    )
+)]
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SparkSha1 {
-    signature: Signature,
+    input_types: SparkInputTypes,
     aliases: Vec<String>,
 }
 
@@ -37,12 +59,9 @@ impl Default for SparkSha1 {
 impl SparkSha1 {
     pub fn new() -> Self {
         Self {
-            signature: Signature::coercible(
-                vec![Coercion::new_implicit(
-                    TypeSignatureClass::Binary,
-                    vec![TypeSignatureClass::Native(logical_string())],
-                    NativeType::Binary,
-                )],
+            // Spark's `Sha1.inputTypes`
+            input_types: SparkInputTypes::new(
+                vec![SparkInputType::Binary],
                 Volatility::Immutable,
             ),
             aliases: vec!["sha".to_string()],
@@ -60,7 +79,19 @@ impl ScalarUDFImpl for SparkSha1 {
     }
 
     fn signature(&self) -> &Signature {
-        &self.signature
+        self.input_types.signature()
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        self.input_types.coerce(self.name(), arg_types)
+    }
+
+    fn with_updated_config(&self, config: &ConfigOptions) -> Option<ScalarUDF> {
+        let input_types = self.input_types.with_config(config)?;
+        Some(ScalarUDF::from(Self {
+            input_types,
+            aliases: self.aliases.clone(),
+        }))
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
@@ -70,6 +101,10 @@ impl ScalarUDFImpl for SparkSha1 {
     fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
         let nullable = args.arg_fields.iter().any(|f| f.is_nullable());
         Ok(Arc::new(Field::new(self.name(), DataType::Utf8, nullable)))
+    }
+
+    fn documentation(&self) -> Option<&Documentation> {
+        self.doc()
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {

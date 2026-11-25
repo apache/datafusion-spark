@@ -4,24 +4,41 @@
 
 use std::sync::Arc;
 
-use arrow::array::AsArray;
-use arrow::compute::{DatePart, date_part};
-use arrow::datatypes::{DataType, Field, FieldRef, Int32Type};
+use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::types::{NativeType, logical_date};
 use datafusion_common::utils::take_function_args;
-use datafusion_common::{Result, ScalarValue, internal_err};
+use datafusion_common::{Result, internal_err};
 use datafusion_expr::{
-    Coercion, ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl,
-    Signature, TypeSignatureClass, Volatility,
+    Coercion, ColumnarValue, Documentation, ReturnFieldArgs, ScalarFunctionArgs,
+    ScalarUDFImpl, Signature, TypeSignatureClass, Volatility,
 };
+use datafusion_macros::user_doc;
+
+use super::dayofweek::{epoch_day_field, week_day};
 
 /// Spark-compatible `weekday` expression.
-/// Returns the day of the week for a date or timestamp as an integer index where
-/// Monday = 0, Tuesday = 1, ..., Sunday = 6.
-///
-/// Note: this differs from `dayofweek`, which is 1-indexed with Sunday = 1.
 ///
 /// <https://spark.apache.org/docs/latest/api/sql/index.html#weekday>
+#[user_doc(
+    doc_section(label = "Time and Date Functions"),
+    description = "Returns the day of the week as an INT from 0 (Monday) to 6 (Sunday). \
+        This differs from `dayofweek`, which counts from 1 (Sunday) to 7 (Saturday). \
+        DataFusion has no built-in `weekday`. Timestamps are cast to DATE first. \
+        Strings are not implicitly cast as they are in Spark ([#41](https://github.com/apache/datafusion-spark/issues/41)). Returns NULL if the input is NULL.",
+    syntax_example = "weekday(date)",
+    sql_example = r#"```sql
+> SELECT weekday(DATE '2009-07-30');
+3
+> SELECT weekday(TIMESTAMP '2024-01-07 23:59:59');
+6
+> SELECT weekday(NULL::DATE);
+NULL
+```"#,
+    argument(
+        name = "date",
+        description = "DATE or TIMESTAMP expression. NULL returns NULL."
+    )
+)]
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SparkWeekDay {
     signature: Signature,
@@ -66,32 +83,22 @@ impl ScalarUDFImpl for SparkWeekDay {
         Ok(Arc::new(Field::new(self.name(), DataType::Int32, nullable)))
     }
 
+    fn documentation(&self) -> Option<&Documentation> {
+        self.doc()
+    }
+
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         let [arg] = take_function_args(self.name(), args.args)?;
-        match arg {
-            ColumnarValue::Scalar(scalar) => {
-                if scalar.is_null() {
-                    return Ok(ColumnarValue::Scalar(ScalarValue::Int32(None)));
-                }
-                let arr = scalar.to_array_of_size(1)?;
-                // `DayOfWeekMonday0` returns 0..=6 with Monday = 0, which
-                // matches Spark `weekday` semantics exactly.
-                let weekday_arr = date_part(&arr, DatePart::DayOfWeekMonday0)?;
-                let value = weekday_arr.as_primitive::<Int32Type>().value(0);
-                Ok(ColumnarValue::Scalar(ScalarValue::Int32(Some(value))))
-            }
-            ColumnarValue::Array(arr) => {
-                let weekday_arr = date_part(&arr, DatePart::DayOfWeekMonday0)?;
-                Ok(ColumnarValue::Array(weekday_arr))
-            }
-        }
+        epoch_day_field(self.name(), arg, week_day)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Date32Array, Int32Array};
+    use arrow::array::{AsArray, Date32Array, Int32Array};
+    use arrow::datatypes::Int32Type;
+    use datafusion_common::ScalarValue;
 
     #[test]
     fn test_weekday_return_field_nullability_matches_input() {

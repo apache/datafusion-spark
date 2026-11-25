@@ -2,17 +2,24 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+//! Spark math functions, such as `abs`, `ceil`, `floor`, `round`, `pmod`, `hex` and `width_bucket`.
+
 pub mod abs;
 pub mod atan2;
 pub mod bin;
+pub mod bround;
 pub mod ceil;
+pub mod divide;
 pub mod expm1;
 pub mod factorial;
 pub mod floor;
+pub mod greatest_least;
 pub mod hex;
 pub mod hypot;
+pub mod log1p;
 pub mod modulus;
 pub mod negative;
+pub mod positive;
 pub mod pow;
 pub mod rint;
 pub mod round;
@@ -30,10 +37,13 @@ make_udf_function!(ceil::SparkCeil, ceil);
 make_udf_function!(expm1::SparkExpm1, expm1);
 make_udf_function!(factorial::SparkFactorial, factorial);
 make_udf_function!(floor::SparkFloor, floor);
+make_udf_function!(greatest_least::SparkGreatest, greatest);
+make_udf_function!(greatest_least::SparkLeast, least);
 make_udf_function!(hex::SparkHex, hex);
 make_udf_function!(hypot::SparkHypot, hypot);
 make_udf_function!(modulus::SparkMod, modulus);
 make_udf_function!(modulus::SparkPmod, pmod);
+make_udf_function!(positive::SparkPositive, positive);
 make_udf_function!(pow::SparkPow, pow);
 make_udf_function!(rint::SparkRint, rint);
 make_udf_function!(round::SparkRound, round);
@@ -43,6 +53,9 @@ make_udf_function!(trigonometry::SparkCsc, csc);
 make_udf_function!(trigonometry::SparkSec, sec);
 make_udf_function!(negative::SparkNegative, negative);
 make_udf_function!(bin::SparkBin, bin);
+make_udf_function!(bround::SparkBRound, bround);
+make_udf_function!(divide::SparkDivide, spark_divide);
+make_udf_function!(log1p::SparkLog1p, log1p);
 
 pub mod expr_fn {
     use datafusion_functions::export_functions;
@@ -57,6 +70,16 @@ pub mod expr_fn {
         arg1
     ));
     export_functions!((floor, "Returns floor of expr.", arg1));
+    export_functions!((
+        greatest,
+        "Returns the greatest value of all arguments, skipping nulls.",
+        args,
+    ));
+    export_functions!((
+        least,
+        "Returns the least value of all arguments, skipping nulls.",
+        args,
+    ));
     export_functions!((hex, "Computes hex value of the given column.", arg1));
     export_functions!((hypot, "Returns sqrt(a^2 + b^2) without intermediate overflow or underflow.", arg1 arg2));
     export_functions!((modulus, "Returns the remainder of division of the first argument by the second argument.", arg1 arg2));
@@ -85,9 +108,20 @@ pub mod expr_fn {
         "Returns the negation of expr (unary minus).",
         arg1
     ));
+    export_functions!((positive, "Returns expr unchanged (unary plus).", arg1));
     export_functions!((
         bin,
         "Returns the string representation of the long value represented in binary.",
+        arg1
+    ));
+    export_functions!((
+        bround,
+        "Rounds the value of expr to scale decimal places using HALF_EVEN rounding mode.",
+        arg1 arg2
+    ));
+    export_functions!((
+        log1p,
+        "Returns the natural logarithm of 1 plus the given value, computed accurately for values near zero. Returns NULL when the input is less than or equal to -1.",
         arg1
     ));
 }
@@ -100,6 +134,8 @@ pub fn functions() -> Vec<Arc<ScalarUDF>> {
         expm1(),
         factorial(),
         floor(),
+        greatest(),
+        least(),
         hex(),
         hypot(),
         modulus(),
@@ -112,6 +148,10 @@ pub fn functions() -> Vec<Arc<ScalarUDF>> {
         csc(),
         sec(),
         negative(),
+        positive(),
         bin(),
+        bround(),
+        spark_divide(),
+        log1p(),
     ]
 }

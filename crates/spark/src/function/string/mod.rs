@@ -2,13 +2,18 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+//! Spark string functions, such as `concat`, `concat_ws`, `format_string`, `substring`,
+//! `base64`, `like` and `ilike`.
+
 pub mod ascii;
 pub mod base64;
 pub mod char;
 pub mod concat;
 pub mod concat_ws;
+pub mod contains;
 pub mod elt;
 pub mod encode;
+pub mod find_in_set;
 pub mod format_string;
 pub mod ilike;
 pub mod is_valid_utf8;
@@ -31,10 +36,12 @@ make_udf_function!(base64::SparkBase64, base64);
 make_udf_function!(char::CharFunc, char);
 make_udf_function!(concat::SparkConcat, concat);
 make_udf_function!(concat_ws::SparkConcatWs, concat_ws);
+make_udf_function!(contains::SparkContains, contains);
 make_udf_function!(ilike::SparkILike, ilike);
 make_udf_function!(length::SparkLengthFunc, length);
 make_udf_function!(elt::SparkElt, elt);
 make_udf_function!(encode::SparkEncode, encode);
+make_udf_function!(find_in_set::SparkFindInSet, find_in_set);
 make_udf_function!(like::SparkLike, like);
 make_udf_function!(luhn_check::SparkLuhnCheck, luhn_check);
 make_udf_function!(format_string::FormatStringFunc, format_string);
@@ -77,6 +84,11 @@ pub mod expr_fn {
         sep args
     ));
     export_functions!((
+        contains,
+        "Returns true if right is found inside left. Both arguments may be strings or binary.",
+        left right
+    ));
+    export_functions!((
         elt,
         "Returns the n-th input (1-indexed), e.g. returns 2nd input when n is 2. The function returns NULL if the index is 0 or exceeds the length of the array.",
         select_col arg1 arg2 argn
@@ -85,6 +97,11 @@ pub mod expr_fn {
         encode,
         "Encodes a string or binary value into binary using the specified character encoding.",
         string_or_binary charset
+    ));
+    export_functions!((
+        find_in_set,
+        "Returns the 1-based position of the first match in a comma-separated list, or 0.",
+        str strlist
     ));
     export_functions!((
         ilike,
@@ -157,8 +174,10 @@ pub fn functions() -> Vec<Arc<ScalarUDF>> {
         char(),
         concat(),
         concat_ws(),
+        contains(),
         elt(),
         encode(),
+        find_in_set(),
         ilike(),
         length(),
         like(),

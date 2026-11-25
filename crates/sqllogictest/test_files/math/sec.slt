@@ -19,12 +19,12 @@ query R
 SELECT sec(a) FROM (VALUES (0::INT), (1::INT), (-1::INT), (null)) AS t(a);
 ----
 1
-1.850815717680926
-1.850815717680926
+1.8508157176809255
+1.8508157176809255
 NULL
 
 query R
-SELECT sec(a) FROM (VALUES (pi()), (3 * pi()/2), (pi()/2) , (arrow_cast('NAN','Float32'))) AS t(a);
+SELECT sec(a) FROM (VALUES (pi()), (3 * pi()/2), (pi()/2) , ('NAN'::FLOAT)) AS t(a);
 ----
 -1
 -5443746451065123

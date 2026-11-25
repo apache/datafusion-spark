@@ -10,6 +10,9 @@ homepage = { workspace = true }
 repository = { workspace = true }
 authors = { workspace = true }
 readme = "README.md"
+keywords = ["arrow", "datafusion", "query", "spark", "sql"]
+categories = ["database-implementations"]
+documentation = "https://docs.rs/datafusion-spark"
 license = { workspace = true }
 edition = { workspace = true }
 
@@ -19,6 +22,9 @@ all-features = true
 [features]
 default = []
 core = ["datafusion"]
+# `sql` enables the Spark planner, including Spark's `/` semantics for SQL
+# expressions: without it `SELECT 1 / 2` returns `0`.
+sql = ["datafusion-expr/sql", "datafusion-functions-nested/sql"]
 
 # Note: add additional linter rules in lib.rs.
 # Rust does not support workspace + new linter rules in subcrates yet
@@ -38,17 +44,20 @@ crc32fast = "1.4"
 # Optional dependency for SessionStateBuilderSpark extension trait
 datafusion = { workspace = true, optional = true, default-features = false }
 datafusion-common = { workspace = true }
+datafusion-doc = { workspace = true }
 datafusion-expr = { workspace = true }
 datafusion-functions = { workspace = true }
 datafusion-functions-aggregate = { workspace = true }
 datafusion-functions-aggregate-common = { workspace = true }
 datafusion-functions-nested = { workspace = true }
+datafusion-macros = { workspace = true }
 datafusion-physical-expr-common = { workspace = true }
 datafusion-session = { workspace = true }
 log = { workspace = true }
 num-traits = { workspace = true }
 percent-encoding = "2.3.2"
 rand = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 sha1 = "0.11"
 sha2 = { workspace = true }
@@ -100,4 +109,20 @@ name = "from_utc_timestamp"
 
 [[bench]]
 harness = false
+name = "dayofweek"
+
+[[bench]]
+harness = false
 name = "stack"
+
+[[bench]]
+harness = false
+name = "array_extrema"
+
+[[bench]]
+harness = false
+name = "array_remove"
+
+[[bench]]
+harness = false
+name = "greatest_least"

@@ -12,13 +12,15 @@ use arrow::datatypes::DataType;
 use datafusion_common::cast::{
     as_large_string_array, as_string_array, as_string_view_array,
 };
-use datafusion_common::{Result, exec_datafusion_err, exec_err};
+use datafusion_common::{DataFusionError, Result, exec_datafusion_err, exec_err};
 use datafusion_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, TypeSignature,
     Volatility,
 };
 use datafusion_functions::utils::make_scalar_function;
 use url::{ParseError, Url};
+
+use crate::EvalMode;
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct ParseUrl {
@@ -95,12 +97,10 @@ impl ParseUrl {
                     _ => None,
                 })
             } else {
-                Err(exec_datafusion_err!(
-                    "The url is invalid: {value}. Use `try_parse_url` to tolerate invalid URL and return NULL instead. SQLSTATE: 22P02"
-                ))
+                Err(Self::invalid_url_err(value))
             };
         }
-        url.map_err(|e| exec_datafusion_err!("{e:?}"))
+        url.map_err(|_| Self::invalid_url_err(value))
             .map(|url| match part {
                 "HOST" => url.host_str().map(String::from),
                 "PATH" => {
@@ -133,6 +133,13 @@ impl ParseUrl {
                 }
                 _ => None,
             })
+    }
+
+    /// The same error for every URL that can't be parsed
+    fn invalid_url_err(value: &str) -> DataFusionError {
+        exec_datafusion_err!(
+            "The url is invalid: {value}. Use `try_parse_url` to tolerate invalid URL and return NULL instead. SQLSTATE: 22P02"
+        )
     }
 
     fn path<'a>(value: &str, url: &'a Url) -> &'a str {
@@ -180,9 +187,9 @@ impl ScalarUDFImpl for ParseUrl {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        let enable_ansi_mode = args.config_options.execution.enable_ansi_mode;
+        let eval_mode = EvalMode::from_config(&args.config_options);
         make_scalar_function(
-            move |arrays: &[ArrayRef]| spark_parse_url(arrays, enable_ansi_mode),
+            move |arrays: &[ArrayRef]| spark_parse_url(arrays, eval_mode),
             vec![],
         )(&args.args)
     }
@@ -203,9 +210,14 @@ impl ScalarUDFImpl for ParseUrl {
 /// - A string array with extracted URL components
 /// - `None` values where extraction failed or component doesn't exist
 /// - The output array type (StringArray or LargeStringArray) is determined by input types
-fn spark_parse_url(args: &[ArrayRef], enable_ansi_mode: bool) -> Result<ArrayRef> {
+///
+/// A URL that cannot be parsed produces `NULL` in [`EvalMode::Legacy`] (Spark's
+/// `parse_url` with ANSI mode off) and [`EvalMode::Try`] (`try_parse_url`), and
+/// an error in [`EvalMode::Ansi`]. An invalid number of arguments or a
+/// non-string argument is an error in every mode.
+pub fn spark_parse_url(args: &[ArrayRef], eval_mode: EvalMode) -> Result<ArrayRef> {
     spark_handled_parse_url(args, |x| match x {
-        Err(_) if !enable_ansi_mode => Ok(None),
+        Err(_) if eval_mode != EvalMode::Ansi => Ok(None),
         result => result,
     })
 }
@@ -637,17 +649,24 @@ mod tests {
         ]);
         let parts = sa(&[Some("HOST"), Some("HOST")]);
 
-        let out = spark_parse_url(&[Arc::clone(&urls), Arc::clone(&parts)], false)?;
-        let out_sa = out.as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(out_sa.value(0), "example.com");
-        assert!(out_sa.is_null(1));
+        for eval_mode in [EvalMode::Legacy, EvalMode::Try] {
+            let out =
+                spark_parse_url(&[Arc::clone(&urls), Arc::clone(&parts)], eval_mode)?;
+            let out_sa = out.as_any().downcast_ref::<StringArray>().unwrap();
+            assert_eq!(out_sa.value(0), "example.com");
+            assert!(out_sa.is_null(1));
+        }
 
-        let err = spark_parse_url(&[Arc::clone(&urls), parts], true).unwrap_err();
+        let err =
+            spark_parse_url(&[Arc::clone(&urls), Arc::clone(&parts)], EvalMode::Ansi)
+                .unwrap_err();
         assert!(format!("{err}").contains("The url is invalid"));
 
-        // Argument errors are not turned into NULL
-        let err = spark_parse_url(from_ref(&urls), false).unwrap_err();
-        assert!(format!("{err}").contains("expects 2 or 3 arguments"));
+        // Argument errors are not turned into NULL in any mode
+        for eval_mode in [EvalMode::Legacy, EvalMode::Ansi, EvalMode::Try] {
+            let err = spark_parse_url(from_ref(&urls), eval_mode).unwrap_err();
+            assert!(format!("{err}").contains("expects 2 or 3 arguments"));
+        }
         Ok(())
     }
 }

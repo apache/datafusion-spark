@@ -13,13 +13,39 @@ use datafusion_common::cast::{
     as_large_string_array, as_string_array, as_string_view_array,
 };
 use datafusion_common::utils::offset_span_len;
-use datafusion_common::{Result, exec_datafusion_err, exec_err, plan_err};
+use datafusion_common::{Result, exec_err, plan_err};
 use datafusion_expr::{
-    ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
+    ColumnarValue, Documentation, ScalarFunctionArgs, ScalarUDFImpl, Signature,
+    Volatility,
 };
 use datafusion_functions::utils::make_scalar_function;
+use datafusion_macros::user_doc;
 use percent_encoding::percent_decode;
 
+/// Spark-compatible `url_decode` expression.
+///
+/// <https://spark.apache.org/docs/latest/api/sql/index.html#url_decode>
+#[user_doc(
+    doc_section(label = "URL Functions"),
+    description = "Decodes a string in `application/x-www-form-urlencoded` format, the inverse of `url_encode`. \
+        DataFusion has no built-in `url_decode`. `+` becomes a space and each `%XX` escape becomes the byte \
+        it encodes, and the bytes are read as UTF-8, with U+FFFD for bytes that are not valid UTF-8. \
+        A `%` that is not followed by two hex digits is an error; use `try_url_decode` to get NULL instead. \
+        Returns NULL if the input is NULL.",
+    syntax_example = "url_decode(str)",
+    sql_example = r#"```sql
+> SELECT url_decode('https%3A%2F%2Fspark.apache.org');
+https://spark.apache.org
+> SELECT url_decode('Spark+SQL%21');
+Spark SQL!
+> SELECT url_decode('%E4%BD%A0%E5%A5%BD');
+你好
+```"#,
+    argument(
+        name = "str",
+        description = "String expression to decode. NULL returns NULL."
+    )
+)]
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct UrlDecode {
     signature: Signature,
@@ -53,23 +79,57 @@ impl UrlDecode {
     ///
     /// * `Ok(Cow<str>)` - The decoded string, borrowed from `value` when there
     ///   was nothing to rewrite and owned otherwise
-    /// * `Err(DataFusionError)` - If the input is malformed or contains invalid UTF-8
+    /// * `Err(DataFusionError)` - If the input is malformed
     fn decode(value: &str) -> Result<Cow<'_, str>> {
         // Check if the string has valid percent encoding
         Self::validate_percent_encoding(value)?;
 
-        match Self::replace_plus(value.as_bytes()) {
+        Ok(match Self::replace_plus(value.as_bytes()) {
             // No '+' was rewritten, so the decode can borrow from `value` itself.
-            Cow::Borrowed(bytes) => percent_decode(bytes)
-                .decode_utf8()
-                .map_err(|e| exec_datafusion_err!("Invalid UTF-8 sequence: {e}")),
+            Cow::Borrowed(bytes) => Self::decode_utf8_lossy(percent_decode(bytes).into()),
             // Rewriting '+' already allocated, so owning the decoded form here
             // costs nothing beyond what has been spent.
-            Cow::Owned(bytes) => percent_decode(&bytes)
-                .decode_utf8()
-                .map(|decoded| Cow::Owned(decoded.into_owned()))
-                .map_err(|e| exec_datafusion_err!("Invalid UTF-8 sequence: {e}")),
+            Cow::Owned(bytes) => Cow::Owned(
+                Self::decode_utf8_lossy(percent_decode(&bytes).into()).into_owned(),
+            ),
+        })
+    }
+
+    /// Reads `bytes` as UTF-8 the way Java's `URLDecoder` does: each invalid
+    /// sequence becomes U+FFFD. Unlike `String::from_utf8_lossy`, an encoded
+    /// surrogate (`ED` followed by `A0..=BF`, plus one more continuation byte
+    /// if present) becomes a single U+FFFD rather than one per byte.
+    fn decode_utf8_lossy(bytes: Cow<'_, [u8]>) -> Cow<'_, str> {
+        match bytes {
+            Cow::Borrowed(bytes) => match std::str::from_utf8(bytes) {
+                Ok(s) => Cow::Borrowed(s),
+                Err(_) => Cow::Owned(Self::replace_invalid_utf8(bytes)),
+            },
+            Cow::Owned(bytes) => match String::from_utf8(bytes) {
+                Ok(s) => Cow::Owned(s),
+                Err(e) => Cow::Owned(Self::replace_invalid_utf8(e.as_bytes())),
+            },
         }
+    }
+
+    fn replace_invalid_utf8(mut rest: &[u8]) -> String {
+        let mut out = String::with_capacity(rest.len());
+        while let Some(chunk) = rest.utf8_chunks().next() {
+            out.push_str(chunk.valid());
+            let mut end = chunk.valid().len() + chunk.invalid().len();
+            if !chunk.invalid().is_empty() {
+                out.push(char::REPLACEMENT_CHARACTER);
+                if chunk.invalid() == [0xED] && matches!(rest.get(end), Some(0xA0..=0xBF))
+                {
+                    end += 1;
+                    if matches!(rest.get(end), Some(0x80..=0xBF)) {
+                        end += 1;
+                    }
+                }
+            }
+            rest = &rest[end..];
+        }
+        out
     }
 
     /// Replace b'+' with b' '
@@ -144,6 +204,10 @@ impl ScalarUDFImpl for UrlDecode {
         }
         // As the type signature is already checked, we can safely return the type of the first argument
         Ok(arg_types[0].clone())
+    }
+
+    fn documentation(&self) -> Option<&Documentation> {
+        self.doc()
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {

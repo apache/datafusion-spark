@@ -33,6 +33,34 @@ have a physical implementation (`invoke_with_args()`) it is not usable by Comet.
 The functions in this crate need only support input types available to Spark; that
 is, they do not need to handle unsigned types or types such as `Float16` or `Decimal64`.
 
+### Input types, casts and ANSI mode
+
+Spark casts a function's arguments before it runs the function, and an invalid value behaves
+differently with ANSI mode on, off, and in the `try_*` functions. Prefer the shared helpers below
+to per-function rules. They keep results and errors consistent, and their module docs have the
+details.
+
+- **Declared input types.** When the Spark expression is `ImplicitCastInputTypes`, declare its
+  `inputTypes` with `SparkInputTypes` (`function/implicit_cast.rs`), which supplies `signature()`,
+  `coerce_types()` and `with_updated_config()` with Spark's errors and ANSI rules. See `sha2`. It
+  only chooses the target types, so the cast that then runs is not yet Spark's.
+- **Checked input types.** When the expression uses `ExpectsInputTypes` without implicit casts,
+  use `SparkInputTypes::check_only`. It shares the declared-type validation and Spark errors,
+  accepts untyped NULLs, and unwraps dictionaries. Widen accepted inputs separately when the
+  execution kernel needs a common representation. See `timestamp_micros`.
+- **Common type of several arguments.** When Spark finds one type for several arguments, as
+  `array_position` does, call the rules in `function/type_coercion.rs` (for example
+  `tightest_common_type()`) from `coerce_types()`.
+- **Casting a value.** To cast a value the way Spark's `CAST` does, call `spark_cast()`
+  (`function/conversion/cast/`) and not Arrow's `cast`. The casts are being ported from Comet
+  ([#88](https://github.com/apache/datafusion-spark/issues/88)). One that is not ported yet returns a
+  "not implemented" error, because Arrow's result would differ from Spark's. Port the missing cast
+  with its tests, or note in the PR that the function depends on it.
+- **ANSI mode.** A function that depends on `spark.sql.ansi.enabled` should take an `EvalMode`
+  (`Legacy`, `Ansi` or `Try`) rather than a `bool`, read with
+  `EvalMode::from_config(&args.config_options)`. A `try_*` function then shares the implementation
+  with `EvalMode::Try`, as `parse_url` and `try_parse_url` do.
+
 [sail]: https://github.com/lakehq/sail
 [comet]: https://github.com/apache/datafusion-comet
 
@@ -80,6 +108,16 @@ impl ScalarUDFImpl for SparkMyFunc {
 See `sha2` (`crates/spark/src/function/hash/sha2.rs`) and `substring`
 (`crates/spark/src/function/string/substring.rs`) for complete examples.
 
+The function reference in [`docs/functions`](docs/functions/README.md) is generated from these
+attributes, with one page per function category. After adding or changing a function's documentation, regenerate it and commit the
+result (CI checks that it is up to date):
+
+```shell
+dev/update_function_docs.sh
+```
+
+The script also lists, on stderr, the functions that don't implement `documentation()` yet.
+
 ## Testing Guidelines
 
 Prefer adding tests via SQLLogicTests where possible, see the [Spark SQLLogicTest README].
@@ -89,3 +127,15 @@ coercion, and is usually more verbose in the setup needed to pass data in (and
 assert output data).
 
 [spark sqllogictest readme]: crates/sqllogictest/test_files/README.md
+
+## API Compatibility
+
+`datafusion-spark` makes minor and patch releases between DataFusion major versions, so `main`
+must not break its public API until it moves to the next DataFusion major version. For example, do
+not remove or rename a public item, or change the signature of a public function. New functions and
+new public items are fine, and so are changes to a function's results that make it match Spark. See
+[Versioning](dev/release/README.md#versioning) for the full policy.
+
+## Releases
+
+The release process is documented in [dev/release/README.md](dev/release/README.md).

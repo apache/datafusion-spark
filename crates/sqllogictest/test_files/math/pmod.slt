@@ -214,7 +214,7 @@ SELECT pmod(10.5::float8, 3.0::float8) as pmod_float_1;
 query R
 SELECT pmod(-7.2::float8, 3.0::float8) as pmod_float_2;
 ----
-1.8
+1.7999999999999998
 
 query R
 SELECT pmod(15.8::float8, 4.2::float8) as pmod_float_3;
@@ -231,10 +231,13 @@ SELECT pmod(5.0::float8, 2.5::float8) as pmod_float_5;
 ----
 0
 
-query R
-SELECT pmod(-5.0::float8, 2.5::float8) as pmod_float_6;
-----
-0
+# Spark 4.2.0 returns -0.0 because its `remainder < 0` check is false for -0.0.
+# DataFusion treats -0.0 as negative, adds the divisor and returns 0.
+# https://github.com/apache/datafusion-spark/issues/343
+# query R
+# SELECT pmod(-5.0::float8, 2.5::float8) as pmod_float_6;
+# ----
+# -0
 
 # PMOD tests with float32
 query R
@@ -373,24 +376,147 @@ SELECT pmod(-10::int8, 3::int8) as pmod_int8_2;
 2
 
 query I
-SELECT pmod(arrow_cast(10, 'Int16'), arrow_cast(3, 'Int16')) as pmod_int16_1;
+SELECT pmod(10::SMALLINT, 3::SMALLINT) as pmod_int16_1;
 ----
 1
 
 query I
-SELECT pmod(arrow_cast(-10, 'Int16'), arrow_cast(3, 'Int16')) as pmod_int16_2;
+SELECT pmod((-10)::SMALLINT, 3::SMALLINT) as pmod_int16_2;
 ----
 2
 
 query I
-SELECT pmod(arrow_cast(10, 'Int64'), arrow_cast(3, 'Int64')) as pmod_int64_1;
+SELECT pmod(10::BIGINT, 3::BIGINT) as pmod_int64_1;
 ----
 1
 
 query I
-SELECT pmod(arrow_cast(-10, 'Int64'), arrow_cast(3, 'Int64')) as pmod_int64_2;
+SELECT pmod((-10)::BIGINT, 3::BIGINT) as pmod_int64_2;
 ----
 2
+
+# PMOD tests at the signed integer boundaries.
+# Spark evaluates `(r + n) % n` with Java arithmetic: `byte` and `short` are
+# promoted to `int` and never overflow, while `int` and `long` wrap around.
+query I
+SELECT pmod((-1)::INT, (-2147483648)::INT);
+----
+2147483647
+
+query I
+SELECT pmod((-2)::INT, (-2147483648)::INT);
+----
+2147483646
+
+query I
+SELECT pmod(2147483647::INT, (-2147483648)::INT);
+----
+2147483647
+
+query I
+SELECT pmod((-2147483648)::INT, (-1)::INT);
+----
+0
+
+query I
+SELECT pmod((-2147483648)::INT, 3::INT);
+----
+1
+
+query I
+SELECT pmod((-1)::BIGINT, (-9223372036854775808)::BIGINT);
+----
+9223372036854775807
+
+query I
+SELECT pmod((-9223372036854775808)::BIGINT, (-1)::BIGINT);
+----
+0
+
+query I
+SELECT pmod(2::BIGINT, 9223372036854775807::BIGINT);
+----
+2
+
+query I
+SELECT pmod((-1)::TINYINT, (-128)::TINYINT);
+----
+-1
+
+query I
+SELECT pmod((-128)::TINYINT, (-1)::TINYINT);
+----
+0
+
+query I
+SELECT pmod((-1)::SMALLINT, (-32768)::SMALLINT);
+----
+-1
+
+query I
+SELECT pmod((-32768)::SMALLINT, (-1)::SMALLINT);
+----
+0
+
+query I
+SELECT pmod(128::SMALLINT, (-32768)::SMALLINT);
+----
+128
+
+# The same boundary cases on array inputs
+query II
+SELECT a, pmod(a, (-2147483648)::INT) FROM (VALUES
+  ((-1)::INT),
+  ((-2)::INT),
+  (2147483647::INT),
+  (NULL::INT)
+) AS t(a);
+----
+-1 2147483647
+-2 2147483646
+2147483647 2147483647
+NULL NULL
+
+# Spark's Pmod uses plain `+` and `%` in ANSI mode too, not `Math.addExact`,
+# so the boundary cases wrap instead of raising an overflow error
+statement ok
+set datafusion.execution.enable_ansi_mode = true;
+
+query I
+SELECT pmod((-1)::INT, (-2147483648)::INT);
+----
+2147483647
+
+query I
+SELECT pmod((-1)::BIGINT, (-9223372036854775808)::BIGINT);
+----
+9223372036854775807
+
+query I
+SELECT pmod((-1)::TINYINT, (-128)::TINYINT);
+----
+-1
+
+query I
+SELECT pmod((-1)::SMALLINT, (-32768)::SMALLINT);
+----
+-1
+
+query II
+SELECT a, pmod(a, (-2147483648)::INT) FROM (VALUES
+  ((-1)::INT),
+  ((-2)::INT),
+  (2147483647::INT),
+  (NULL::INT)
+) AS t(a);
+----
+-1 2147483647
+-2 2147483646
+2147483647 2147483647
+NULL NULL
+
+statement ok
+set datafusion.execution.enable_ansi_mode = false;
 
 # PMOD tests with unsigned integers
 query I
@@ -429,7 +555,11 @@ SELECT pmod(10.5, 3.0) as pmod_scalar_3;
 ----
 1.5
 
+# DataFusion types the untyped `-7.2` and `3.0` as DOUBLE, while Spark reads them as
+# DECIMAL and returns 1.8 (https://github.com/apache/datafusion-spark/issues/97).
+# The `::float8` query above checks the DOUBLE result.
+# xfail spark: Spark types the unsuffixed literals as INT/DECIMAL, DataFusion as BIGINT/DOUBLE (https://github.com/apache/datafusion-spark/issues/97)
 query R
 SELECT pmod(-7.2, 3.0) as pmod_scalar_4;
 ----
-1.8
+1.7999999999999998

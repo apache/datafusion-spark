@@ -2,13 +2,104 @@
 # SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 # SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
-# This file was originally created by a porting script from:
-#   https://github.com/lakehq/sail/tree/43b6ed8221de5c4c4adbedbb267ae1351158b43c/crates/sail-spark-connect/tests/gold_data/function
-# This file is part of the implementation of the datafusion-spark function library.
-# For more information, please see:
-#   https://github.com/apache/datafusion/issues/15914
+# Basic values and a negative input within the domain
+query R
+SELECT log1p(0.5::DOUBLE);
+----
+0.4054651081081644
 
-## Original Query: SELECT log1p(0);
-## PySpark 3.5.5 Result: {'LOG1P(0)': 0.0, 'typeof(LOG1P(0))': 'double', 'typeof(0)': 'int'}
-#query
-#SELECT log1p(0::int);
+query R
+SELECT log1p(1.0::DOUBLE);
+----
+0.6931471805599453
+
+query R
+SELECT log1p(-0.5::DOUBLE);
+----
+-0.6931471805599453
+
+# A value immediately greater than the boundary -1
+query R
+SELECT log1p(-0.9999999999999999::DOUBLE);
+----
+-36.7368005696771
+
+# The boundary and values outside the domain return NULL
+query R
+SELECT log1p(-1.0::DOUBLE);
+----
+NULL
+
+query R
+SELECT log1p(-2.0::DOUBLE);
+----
+NULL
+
+query R
+SELECT log1p(CAST('-Infinity' AS DOUBLE));
+----
+NULL
+
+# NULL input returns NULL
+query R
+SELECT log1p(CAST(NULL AS DOUBLE));
+----
+NULL
+
+# Evaluate multiple values in a column
+query R
+SELECT log1p(a)
+FROM (VALUES
+    (0.0::DOUBLE),
+    (0.5::DOUBLE),
+    (-0.5::DOUBLE),
+    (-1.0::DOUBLE)
+) AS t(a);
+----
+0
+0.4054651081081644
+-0.6931471805599453
+NULL
+
+# Small inputs retain precision near zero
+query B
+SELECT log1p(1e-300::DOUBLE) = 1e-300::DOUBLE;
+----
+true
+
+query B
+SELECT log1p(1e-20::DOUBLE) = 1e-20::DOUBLE;
+----
+true
+
+# NaN and positive infinity are preserved
+query R
+SELECT log1p(CAST('NaN' AS DOUBLE));
+----
+NaN
+
+query R
+SELECT log1p(CAST('Infinity' AS DOUBLE));
+----
+Infinity
+
+# Integer, float, decimal, and string inputs
+query R
+SELECT log1p(CAST(1 AS INT));
+----
+0.6931471805599453
+
+query R
+SELECT log1p(CAST(0.5 AS FLOAT));
+----
+0.4054651081081644
+
+query R
+SELECT log1p(CAST(0.5 AS DECIMAL(10, 2)));
+----
+0.4054651081081644
+
+query R
+SELECT log1p('0.5');
+----
+0.4054651081081644

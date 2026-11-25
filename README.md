@@ -31,6 +31,14 @@ datafusion = "56"
 datafusion-spark = { version = "56", features = ["core"] }
 ```
 
+The `core` feature provides the session helper and registers the Spark functions. Add `sql` as
+well to enable the Spark planner rewrites, which is what gives operators such as `/` their Spark
+semantics (both sides cast to `DOUBLE`, and a zero divisor returns `NULL`):
+
+```toml
+datafusion-spark = { version = "56", features = ["core", "sql"] }
+```
+
 Call `with_spark_features` **after** `with_default_features`, since Spark functions replace DataFusion
 functions with the same name:
 
@@ -49,13 +57,16 @@ let ctx = SessionContext::new_with_state(state);
 let df = ctx.sql("SELECT sha2('Spark', 256)").await?;
 ```
 
-See the [crate README](crates/spark/README.md) and the [API documentation](https://docs.rs/datafusion-spark)
+See the [function reference](docs/functions/README.md) for the documented functions, the
+[crate README](crates/spark/README.md) and the [API documentation](https://docs.rs/datafusion-spark)
 for more.
 
 ## Repository layout
 
 - `crates/spark` – the `datafusion-spark` crate
 - `crates/sqllogictest` – SQL logic tests for the Spark functions
+- `crates/cli` – `datafusion-spark-cli`, a SQL shell with the Spark functions registered
+  (`cargo run -p datafusion-spark-cli`)
 - `.ai/skills` – agent skills for working on this repository (see `AGENTS.md`)
 
 ## Building and testing
