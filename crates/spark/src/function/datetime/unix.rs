@@ -82,8 +82,11 @@ impl ScalarUDFImpl for SparkUnixDate {
         self.doc()
     }
 
-    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        internal_err!("invoke_with_args should not be called on SparkUnixDate")
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        // Same as the simplified form: CAST(CAST(date AS DATE) AS INT)
+        let [date] = take_function_args(self.name(), args.args)?;
+        date.cast_to(&DataType::Date32, None)?
+            .cast_to(&DataType::Int32, None)
     }
 
     fn simplify(

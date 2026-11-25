@@ -4,31 +4,33 @@
 
 # Unix Date tests
 
-# `unix_date` has no `invoke_with_args` yet, so these are skipped in evaluate mode
-# (https://github.com/apache/datafusion-spark/issues/306).
-skipif evaluate
 query I
 SELECT unix_date('1970-01-02'::date);
 ----
 1
 
-skipif evaluate
 query I
 SELECT unix_date('1900-01-02'::date);
 ----
 -25566
 
 
-skipif evaluate
 query I
 SELECT unix_date(arrow_cast('1970-01-02', 'Date64'));
 ----
 1
 
-skipif evaluate
 query I
 SELECT unix_date(NULL::date);
 ----
+NULL
+
+# Column input, including NULL
+query I
+SELECT unix_date(d) FROM VALUES ('1970-01-02'::date), ('1900-01-02'::date), (NULL::date) AS t(d);
+----
+1
+-25566
 NULL
 
 query error Function 'unix_date' requires Date, but received String \(DataType: Utf8View\)

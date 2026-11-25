@@ -41,9 +41,6 @@ SELECT make_date(2023, 2, 29), make_date(1900, 2, 29), make_date(2023, 2, 30),
 NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL
 
 # Years outside 0001-9999 are accepted; year 0 is 1 BC
-# `unix_date` has no `invoke_with_args` yet, so this is skipped in evaluate mode
-# (https://github.com/apache/datafusion-spark/issues/306).
-skipif evaluate
 query IIIIII
 SELECT unix_date(make_date(0, 1, 1)), unix_date(make_date(-1, 1, 1)),
   unix_date(make_date(300000, 6, 15)), unix_date(make_date(300000, 2, 29)),
