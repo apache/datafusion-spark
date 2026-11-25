@@ -26,6 +26,7 @@ pub mod monthname;
 pub mod next_day;
 pub mod time_trunc;
 pub mod timestamp_micros;
+pub mod timestamp_seconds;
 pub(crate) mod timezone;
 pub mod to_utc_timestamp;
 pub mod trunc;
@@ -64,6 +65,7 @@ make_udf_function!(monthname::SparkMonthName, monthname);
 make_udf_function!(next_day::SparkNextDay, next_day);
 make_udf_function!(time_trunc::SparkTimeTrunc, time_trunc);
 make_udf_function!(timestamp_micros::SparkTimestampMicros, timestamp_micros);
+make_udf_function!(timestamp_seconds::SparkTimestampSeconds, timestamp_seconds);
 make_udf_function!(to_utc_timestamp::SparkToUtcTimestamp, to_utc_timestamp);
 make_udf_function!(trunc::SparkTrunc, trunc);
 make_udf_function!(unix::SparkUnixDate, unix_date);
@@ -201,6 +203,11 @@ pub mod expr_fn {
         microseconds
     ));
     export_functions!((
+        timestamp_seconds,
+        "Creates a timestamp from numeric seconds since the UTC epoch, preserving microseconds.",
+        seconds
+    ));
+    export_functions!((
         to_utc_timestamp,
         "Interpret a given timestamp `ts` in timezone `tz` and then convert it to UTC timezone.",
         ts tz
@@ -256,6 +263,7 @@ pub fn functions() -> Vec<Arc<ScalarUDF>> {
         second(),
         time_trunc(),
         timestamp_micros(),
+        timestamp_seconds(),
         to_utc_timestamp(),
         trunc(),
         unix_date(),

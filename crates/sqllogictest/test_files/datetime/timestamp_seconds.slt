@@ -2,18 +2,430 @@
 # SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 # SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
-# This file was originally created by a porting script from:
-#   https://github.com/lakehq/sail/tree/43b6ed8221de5c4c4adbedbb267ae1351158b43c/crates/sail-spark-connect/tests/gold_data/function
-# This file is part of the implementation of the datafusion-spark function library.
-# For more information, please see:
-#   https://github.com/apache/datafusion/issues/15914
+# Original placeholder queries were ported from:
+# https://github.com/lakehq/sail/tree/43b6ed8221de5c4c4adbedbb267ae1351158b43c/crates/sail-spark-connect/tests/gold_data/function
 
-## Original Query: SELECT timestamp_seconds(1230219000);
-## PySpark 3.5.5 Result: {'timestamp_seconds(1230219000)': datetime.datetime(2008, 12, 25, 7, 30), 'typeof(timestamp_seconds(1230219000))': 'timestamp', 'typeof(1230219000)': 'int'}
-#query
-#SELECT timestamp_seconds(1230219000::int);
+# Expected results verified against Apache Spark 4.2.0.
 
-## Original Query: SELECT timestamp_seconds(1230219000.123);
-## PySpark 3.5.5 Result: {'timestamp_seconds(1230219000.123)': datetime.datetime(2008, 12, 25, 7, 30, 0, 123000), 'typeof(timestamp_seconds(1230219000.123))': 'timestamp', 'typeof(1230219000.123)': 'decimal(13,3)'}
-#query
-#SELECT timestamp_seconds(1230219000.123::decimal(13,3));
+query PPP
+SELECT timestamp_seconds(1230219000::INT), timestamp_seconds('1230219000.123'::DECIMAL(13,3)), timestamp_seconds(-1230219000::BIGINT);
+----
+2008-12-25T15:30:00Z 2008-12-25T15:30:00.123Z 1931-01-07T08:30:00Z
+
+query PPPP
+SELECT timestamp_seconds(NULL) AS untyped_null, timestamp_seconds(NULL::BIGINT) AS integer_null,
+  timestamp_seconds(NULL::DOUBLE) AS double_null, timestamp_seconds(NULL::DECIMAL(38,7)) AS decimal_null;
+----
+NULL NULL NULL NULL
+
+# Use string-to-DECIMAL casts to avoid DataFusion parsing fractional literals as DOUBLE.
+# Arithmetic semantics are independent of ANSI mode.
+statement ok
+SET datafusion.execution.enable_ansi_mode = false;
+
+query I
+SELECT unix_micros(timestamp_seconds(x)) FROM (VALUES ((-1)::TINYINT), (0::TINYINT), (1::TINYINT), (NULL::TINYINT)) AS t(x);
+----
+-1000000
+0
+1000000
+NULL
+
+query I
+SELECT unix_micros(timestamp_seconds(x)) FROM (VALUES ((-1)::SMALLINT), (0::SMALLINT), (1::SMALLINT), (NULL::SMALLINT)) AS t(x);
+----
+-1000000
+0
+1000000
+NULL
+
+query I
+SELECT unix_micros(timestamp_seconds(x)) FROM (VALUES ((-1)::INT), (0::INT), (1::INT), (NULL::INT)) AS t(x);
+----
+-1000000
+0
+1000000
+NULL
+
+query I
+SELECT unix_micros(timestamp_seconds(x)) FROM (VALUES ((-1)::BIGINT), (0::BIGINT), (1::BIGINT), (NULL::BIGINT)) AS t(x);
+----
+-1000000
+0
+1000000
+NULL
+
+query II
+SELECT unix_micros(timestamp_seconds((-9223372036854)::BIGINT)), unix_micros(timestamp_seconds(9223372036854::BIGINT));
+----
+-9223372036854000000 9223372036854000000
+
+query error long overflow
+SELECT timestamp_seconds((9223372036855)::BIGINT);
+
+query error long overflow
+SELECT timestamp_seconds((-9223372036855)::BIGINT);
+
+query error long overflow
+SELECT timestamp_seconds((9223372036854775807)::BIGINT);
+
+query error long overflow
+SELECT timestamp_seconds((-9223372036854775808)::BIGINT);
+
+query error long overflow
+SELECT timestamp_seconds(x) FROM (VALUES (1::BIGINT), (9223372036855::BIGINT)) AS t(x);
+
+query I
+SELECT unix_micros(timestamp_seconds(x)) FROM (VALUES ('-1.5'::DECIMAL(38,7)), ('0.1234560'::DECIMAL(38,7)), (NULL::DECIMAL(38,7))) AS t(x);
+----
+-1500000
+123456
+NULL
+
+query II
+SELECT unix_micros(timestamp_seconds('9223372036854.775807'::DECIMAL(38,6))), unix_micros(timestamp_seconds('-9223372036854.775808'::DECIMAL(38,6)));
+----
+9223372036854775807 -9223372036854775808
+
+query I
+SELECT unix_micros(timestamp_seconds('1'::DECIMAL(38,0)));
+----
+1000000
+
+query error Rounding necessary
+SELECT timestamp_seconds('0.1234567'::DECIMAL(38,7));
+
+query error Rounding necessary
+SELECT timestamp_seconds('-0.0000001'::DECIMAL(38,7));
+
+query error Rounding necessary
+SELECT timestamp_seconds(x) FROM (VALUES ('1.0'::DECIMAL(38,7)), ('0.1234567'::DECIMAL(38,7))) AS t(x);
+
+query error Overflow
+SELECT timestamp_seconds('99999999999999999999999999999999999999'::DECIMAL(38,0));
+
+query error Overflow
+SELECT timestamp_seconds('9223372036854.775808'::DECIMAL(38,6));
+
+query error Overflow
+SELECT timestamp_seconds('-9223372036854.775809'::DECIMAL(38,6));
+
+query error Overflow
+SELECT timestamp_seconds('10000000000000.0000001'::DECIMAL(38,7));
+
+query I
+SELECT unix_micros(timestamp_seconds(x)) FROM (VALUES ('1.23'::FLOAT), ('-1.23'::FLOAT), ('0.1234567'::FLOAT), ('-0.0000015'::FLOAT), ('-0.0'::FLOAT), ('NaN'::FLOAT), ('Infinity'::FLOAT), ('-Infinity'::FLOAT), (NULL::FLOAT)) AS t(x);
+----
+1230000
+-1230000
+123456
+-1
+0
+NULL
+NULL
+NULL
+NULL
+
+query II
+SELECT unix_micros(timestamp_seconds('1e30'::FLOAT)), unix_micros(timestamp_seconds('-1e30'::FLOAT));
+----
+9223372036854775807 -9223372036854775808
+
+query I
+SELECT unix_micros(timestamp_seconds(x)) FROM (VALUES ('1.23'::DOUBLE), ('-1.23'::DOUBLE), ('0.1234567'::DOUBLE), ('-0.0000015'::DOUBLE), ('-0.0'::DOUBLE), ('NaN'::DOUBLE), ('Infinity'::DOUBLE), ('-Infinity'::DOUBLE), (NULL::DOUBLE)) AS t(x);
+----
+1230000
+-1230000
+123456
+-1
+0
+NULL
+NULL
+NULL
+NULL
+
+query II
+SELECT unix_micros(timestamp_seconds('1e300'::DOUBLE)), unix_micros(timestamp_seconds('-1e300'::DOUBLE));
+----
+9223372036854775807 -9223372036854775808
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_seconds('1');
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_seconds(true);
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_seconds(TIMESTAMP '1970-01-01 00:00:00');
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_seconds(DATE '1970-01-01');
+
+# Arithmetic semantics are independent of ANSI mode.
+statement ok
+SET datafusion.execution.enable_ansi_mode = true;
+
+query I
+SELECT unix_micros(timestamp_seconds(x)) FROM (VALUES ((-1)::TINYINT), (0::TINYINT), (1::TINYINT), (NULL::TINYINT)) AS t(x);
+----
+-1000000
+0
+1000000
+NULL
+
+query I
+SELECT unix_micros(timestamp_seconds(x)) FROM (VALUES ((-1)::SMALLINT), (0::SMALLINT), (1::SMALLINT), (NULL::SMALLINT)) AS t(x);
+----
+-1000000
+0
+1000000
+NULL
+
+query I
+SELECT unix_micros(timestamp_seconds(x)) FROM (VALUES ((-1)::INT), (0::INT), (1::INT), (NULL::INT)) AS t(x);
+----
+-1000000
+0
+1000000
+NULL
+
+query I
+SELECT unix_micros(timestamp_seconds(x)) FROM (VALUES ((-1)::BIGINT), (0::BIGINT), (1::BIGINT), (NULL::BIGINT)) AS t(x);
+----
+-1000000
+0
+1000000
+NULL
+
+query II
+SELECT unix_micros(timestamp_seconds((-9223372036854)::BIGINT)), unix_micros(timestamp_seconds(9223372036854::BIGINT));
+----
+-9223372036854000000 9223372036854000000
+
+query error long overflow
+SELECT timestamp_seconds((9223372036855)::BIGINT);
+
+query error long overflow
+SELECT timestamp_seconds((-9223372036855)::BIGINT);
+
+query error long overflow
+SELECT timestamp_seconds((9223372036854775807)::BIGINT);
+
+query error long overflow
+SELECT timestamp_seconds((-9223372036854775808)::BIGINT);
+
+query error long overflow
+SELECT timestamp_seconds(x) FROM (VALUES (1::BIGINT), (9223372036855::BIGINT)) AS t(x);
+
+query I
+SELECT unix_micros(timestamp_seconds(x)) FROM (VALUES ('-1.5'::DECIMAL(38,7)), ('0.1234560'::DECIMAL(38,7)), (NULL::DECIMAL(38,7))) AS t(x);
+----
+-1500000
+123456
+NULL
+
+query II
+SELECT unix_micros(timestamp_seconds('9223372036854.775807'::DECIMAL(38,6))), unix_micros(timestamp_seconds('-9223372036854.775808'::DECIMAL(38,6)));
+----
+9223372036854775807 -9223372036854775808
+
+query I
+SELECT unix_micros(timestamp_seconds('1'::DECIMAL(38,0)));
+----
+1000000
+
+query error Rounding necessary
+SELECT timestamp_seconds('0.1234567'::DECIMAL(38,7));
+
+query error Rounding necessary
+SELECT timestamp_seconds('-0.0000001'::DECIMAL(38,7));
+
+query error Rounding necessary
+SELECT timestamp_seconds(x) FROM (VALUES ('1.0'::DECIMAL(38,7)), ('0.1234567'::DECIMAL(38,7))) AS t(x);
+
+query error Overflow
+SELECT timestamp_seconds('99999999999999999999999999999999999999'::DECIMAL(38,0));
+
+query error Overflow
+SELECT timestamp_seconds('9223372036854.775808'::DECIMAL(38,6));
+
+query error Overflow
+SELECT timestamp_seconds('-9223372036854.775809'::DECIMAL(38,6));
+
+query error Overflow
+SELECT timestamp_seconds('10000000000000.0000001'::DECIMAL(38,7));
+
+query I
+SELECT unix_micros(timestamp_seconds(x)) FROM (VALUES ('1.23'::FLOAT), ('-1.23'::FLOAT), ('0.1234567'::FLOAT), ('-0.0000015'::FLOAT), ('-0.0'::FLOAT), ('NaN'::FLOAT), ('Infinity'::FLOAT), ('-Infinity'::FLOAT), (NULL::FLOAT)) AS t(x);
+----
+1230000
+-1230000
+123456
+-1
+0
+NULL
+NULL
+NULL
+NULL
+
+query II
+SELECT unix_micros(timestamp_seconds('1e30'::FLOAT)), unix_micros(timestamp_seconds('-1e30'::FLOAT));
+----
+9223372036854775807 -9223372036854775808
+
+query I
+SELECT unix_micros(timestamp_seconds(x)) FROM (VALUES ('1.23'::DOUBLE), ('-1.23'::DOUBLE), ('0.1234567'::DOUBLE), ('-0.0000015'::DOUBLE), ('-0.0'::DOUBLE), ('NaN'::DOUBLE), ('Infinity'::DOUBLE), ('-Infinity'::DOUBLE), (NULL::DOUBLE)) AS t(x);
+----
+1230000
+-1230000
+123456
+-1
+0
+NULL
+NULL
+NULL
+NULL
+
+query II
+SELECT unix_micros(timestamp_seconds('1e300'::DOUBLE)), unix_micros(timestamp_seconds('-1e300'::DOUBLE));
+----
+9223372036854775807 -9223372036854775808
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_seconds('1');
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_seconds(true);
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_seconds(TIMESTAMP '1970-01-01 00:00:00');
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_seconds(DATE '1970-01-01');
+
+statement ok
+SET datafusion.execution.enable_ansi_mode = false;
+
+query I
+SELECT unix_micros(timestamp_seconds(arrow_cast(x, 'Dictionary(Int32, Int64)'))) FROM (VALUES (1::BIGINT), (-1::BIGINT), (NULL::BIGINT)) AS t(x);
+----
+1000000
+-1000000
+NULL
+
+query I
+SELECT unix_micros(timestamp_seconds(arrow_cast(x, 'Dictionary(Int32, Float32)'))) FROM (VALUES ('1.23'::FLOAT), ('NaN'::FLOAT), (NULL::FLOAT)) AS t(x);
+----
+1230000
+NULL
+NULL
+
+query I
+SELECT unix_micros(timestamp_seconds(arrow_cast(x, 'Dictionary(Int32, Float64)'))) FROM (VALUES ('0.1234567'::DOUBLE), ('Infinity'::DOUBLE), (NULL::DOUBLE)) AS t(x);
+----
+123456
+NULL
+NULL
+
+query I
+SELECT unix_micros(timestamp_seconds(arrow_cast(x, 'Dictionary(Int32, Decimal128(38, 7))'))) FROM (VALUES ('1.2300000'::DECIMAL(38,7)), ('-1.5000000'::DECIMAL(38,7)), (NULL::DECIMAL(38,7))) AS t(x);
+----
+1230000
+-1500000
+NULL
+
+query III
+SELECT unix_micros(timestamp_seconds(arrow_cast(255, 'UInt8'))), unix_micros(timestamp_seconds(arrow_cast(65535, 'UInt16'))), unix_micros(timestamp_seconds(arrow_cast(4294967295, 'UInt32')));
+----
+255000000 65535000000 4294967295000000
+
+query I
+SELECT unix_micros(timestamp_seconds(arrow_cast(1, 'UInt64')));
+----
+1000000
+
+query error Overflow
+SELECT timestamp_seconds(arrow_cast('18446744073709551615', 'UInt64'));
+
+query I
+SELECT unix_micros(timestamp_seconds(arrow_cast(x, 'Decimal32(9, 7)'))) FROM (VALUES ('1.23'::DECIMAL(3,2)), (NULL::DECIMAL(3,2))) AS t(x);
+----
+1230000
+NULL
+
+query I
+SELECT unix_micros(timestamp_seconds(arrow_cast(x, 'Decimal64(18, 7)'))) FROM (VALUES ('1.23'::DECIMAL(3,2)), (NULL::DECIMAL(3,2))) AS t(x);
+----
+1230000
+NULL
+
+query I
+SELECT unix_micros(timestamp_seconds(arrow_cast(x, 'Decimal256(50, 7)'))) FROM (VALUES ('1.23'::DECIMAL(3,2)), (NULL::DECIMAL(3,2))) AS t(x);
+----
+1230000
+NULL
+
+query error WRONG_NUM_ARGS
+SELECT timestamp_seconds();
+
+query error WRONG_NUM_ARGS
+SELECT timestamp_seconds(1, 2);
+
+statement ok
+SET datafusion.execution.time_zone = 'America/Los_Angeles';
+
+query PP
+SELECT timestamp_seconds(1230219000::BIGINT), timestamp_seconds('1230219000.123'::DECIMAL(13,3));
+----
+2008-12-25T07:30:00-08:00 2008-12-25T07:30:00.123-08:00
+
+query PI
+SELECT timestamp_seconds(x), unix_micros(timestamp_seconds(x)) FROM (VALUES (1552211999::BIGINT), (1552212000::BIGINT)) AS t(x);
+----
+2019-03-10T01:59:59-08:00 1552211999000000
+2019-03-10T03:00:00-07:00 1552212000000000
+
+statement ok
+SET datafusion.execution.time_zone = 'UTC';
+
+query T
+SELECT arrow_typeof(timestamp_seconds(0::BIGINT));
+----
+Timestamp(µs, "UTC")
+
+
+# Scalar floating-point execution follows the same truncation and NULL rules.
+query IIIIP
+SELECT unix_micros(timestamp_seconds('1.23'::FLOAT)),
+  unix_micros(timestamp_seconds('-0.0000015'::DOUBLE)),
+  unix_micros(timestamp_seconds('-0.0'::DOUBLE)),
+  unix_micros(timestamp_seconds('0.1234567'::DOUBLE)),
+  timestamp_seconds('NaN'::DOUBLE);
+----
+1230000 -1 0 123456 NULL
+
+query error The first parameter of `timestamp_seconds` requires the "NUMERIC" type, however it has the type "STRING".
+SELECT timestamp_seconds('1');
+
+# Spark DateExpressionsSuite cases: widening FLOAT before multiplication is essential.
+query II
+SELECT unix_micros(timestamp_seconds(16777215::FLOAT)),
+  unix_micros(timestamp_seconds(123.456789123::DOUBLE));
+----
+16777215000000 123456789
+
+query I
+SELECT unix_micros(timestamp_seconds(x))
+FROM (VALUES (16777215::FLOAT), (-16777215::FLOAT), (NULL::FLOAT)) AS t(x);
+----
+16777215000000
+-16777215000000
+NULL
+
+# Spark's BigDecimal checks large integer digits before rounding, but otherwise
+# fractional microseconds take precedence over the signed BIGINT range check.
+query error Rounding necessary
+SELECT timestamp_seconds('9223372036854.7758081'::DECIMAL(38,7));
+
+query error DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+SELECT timestamp_seconds(NULL::STRING);

@@ -39,6 +39,7 @@ Part of the [datafusion-spark function reference](../README.md).
 - [second](#second)
 - [time_trunc](#time_trunc)
 - [timestamp_micros](#timestamp_micros)
+- [timestamp_seconds](#timestamp_seconds)
 - [to_utc_timestamp](#to_utc_timestamp)
 - [trunc](#trunc)
 - [unix_date](#unix_date)
@@ -623,6 +624,27 @@ timestamp_micros(microseconds)
 1969-12-31T23:59:59.999999Z
 > SELECT timestamp_micros(NULL);
 NULL
+```
+
+## `timestamp_seconds`
+
+Creates a timestamp from seconds since the UTC epoch, preserving fractions to microsecond precision. Unlike DataFusion's `to_timestamp_seconds`, strings are rejected and the result has microsecond precision. Integers raise `long overflow` when scaling overflows. Decimals must convert exactly: fractional microseconds raise `Rounding necessary`, and out-of-range values raise `Overflow`. These errors occur in both ANSI and non-ANSI modes. FLOAT is widened to DOUBLE before scaling; floating-point results truncate toward zero and saturate at the BIGINT limits. NaN and infinity return NULL. NULL input returns NULL. The result uses the session time zone (`datafusion.execution.time_zone`, default UTC), which affects display but not the stored value.
+
+```sql
+timestamp_seconds(seconds)
+```
+
+### Arguments
+
+- **seconds**: Numeric seconds since the UTC epoch: TINYINT, SMALLINT, INT, BIGINT, DECIMAL, FLOAT or DOUBLE. Non-numeric inputs are rejected without implicit casts.
+
+### Example
+
+```sql
+> SELECT timestamp_seconds(1.23::DECIMAL(3,2));
+1970-01-01T00:00:01.230Z
+> SELECT timestamp_seconds(-1::BIGINT);
+1969-12-31T23:59:59Z
 ```
 
 ## `to_utc_timestamp`
