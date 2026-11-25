@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 # SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
-"""Run the datafusion-spark sqllogictest files against Apache Spark 4.2.
+"""Run the datafusion-spark sqllogictest files against Apache Spark 3.5 or 4.2.
 
 Each record in crates/sqllogictest/test_files/**/*.slt is run on a
 local PySpark session, and Spark's result is compared with the expected result
@@ -11,7 +11,7 @@ in the file. The expected results come from DataFusion, so every difference
 reported here is a query where DataFusion and Spark disagree, or where the
 test expects the wrong value.
 
-Running Spark is manual; only the unit tests run in CI. See README.md for setup.
+CI runs this on every supported Spark version. See README.md for setup.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import math
+import operator
 import os
 import re
 import struct
@@ -32,7 +33,8 @@ from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
 from typing import Optional
 
-SPARK_VERSION = "4.2"
+# The Spark versions this runner supports, as (major, minor). CI runs every one.
+SUPPORTED_VERSIONS = ((3, 5), (4, 2))
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[2]
@@ -44,10 +46,23 @@ LABEL = "spark"
 # A comment that marks the next record as a known difference from Spark:
 #
 #     # xfail spark: <reason>
+#     # xfail spark<4.0: <reason>
+#
+# The second form applies only to the Spark versions that match every
+# comma-separated condition, such as `>=4.0, <4.2`. A record can have several
+# markers, and the first that matches the Spark version applies.
 #
 # The Rust sqllogictest parser rejects directives it does not know, so the
 # marker is a comment, which DataFusion's runner ignores.
-_XFAIL_RE = re.compile(rf"#\s*xfail\s+{LABEL}\s*:\s*(.*\S)\s*$")
+_XFAIL_RE = re.compile(rf"#\s*xfail\s+{LABEL}\b([^:]*):\s*(.*\S)\s*$")
+_VERSION_CONDITION_RE = re.compile(r"\s*(<=|>=|==|<|>)\s*(\d+)\.(\d+)\s*")
+_COMPARISONS = {
+    "<": operator.lt,
+    "<=": operator.le,
+    ">": operator.gt,
+    ">=": operator.ge,
+    "==": operator.eq,
+}
 
 # DataFusion runs these files with ANSI mode off and no time zone (UTC), so
 # every file starts from the same Spark settings.
@@ -117,12 +132,61 @@ class Record:
     sort_mode: str = "nosort"
     expected: list[str] = field(default_factory=list)
     skip_reason: Optional[str] = None
-    # Why Spark is expected to disagree, from an `# xfail spark:` comment.
-    xfail_reason: Optional[str] = None
+    # Why Spark is expected to disagree, from `# xfail spark:` comments.
+    xfails: list[Xfail] = field(default_factory=list)
 
     @property
     def location(self) -> str:
         return f"{_display_path(self.path)}:{self.line}"
+
+    def xfail(self, version: tuple[int, int]) -> Optional[Xfail]:
+        """The first `# xfail spark` marker that applies to this Spark version."""
+        return next((x for x in self.xfails if x.applies_to(version)), None)
+
+
+@dataclass
+class Xfail:
+    """An `# xfail spark: <reason>` comment."""
+
+    # (operator, (major, minor)) pairs that the Spark version must all match.
+    conditions: list[tuple[str, tuple[int, int]]]
+    reason: str
+    # The comment as written, for the report that asks to remove it.
+    text: str
+
+    def applies_to(self, version: tuple[int, int]) -> bool:
+        return all(_COMPARISONS[op](version, v) for op, v in self.conditions)
+
+
+def version_tuple(version: str) -> tuple[int, int]:
+    """(major, minor) of a version such as `4.2.0` or `4.2.0.dev1`."""
+    major, minor = version.split(".")[:2]
+    return int(major), int(minor)
+
+
+def _version_string(version: tuple[int, int]) -> str:
+    return ".".join(map(str, version))
+
+
+def parse_xfail(line: str) -> Optional[Xfail]:
+    """Parse an `# xfail spark` comment, or return None for any other line.
+
+    Raises ValueError for a version condition this runner cannot read."""
+    m = _XFAIL_RE.match(line.strip())
+    if not m:
+        return None
+    spec, reason = m.group(1).strip(), m.group(2)
+    conditions = []
+    if spec:
+        for part in spec.split(","):
+            c = _VERSION_CONDITION_RE.fullmatch(part)
+            if not c:
+                raise ValueError(
+                    f"cannot read the Spark version condition `{spec}`. Write a "
+                    "comparison such as `<4.0` or `==3.5`, or several separated by commas"
+                )
+            conditions.append((c.group(1), (int(c.group(2)), int(c.group(3)))))
+    return Xfail(conditions, reason, line.strip())
 
 
 def parse_slt(path: Path) -> list[Record]:
@@ -130,13 +194,16 @@ def parse_slt(path: Path) -> list[Record]:
     lines = path.read_text().split("\n")
     records: list[Record] = []
     conditions: list[tuple[str, str]] = []
-    xfail_reason: Optional[str] = None
+    xfails: list[Xfail] = []
     i = 0
     while i < len(lines):
         words = lines[i].split()
-        m = _XFAIL_RE.match(lines[i].strip())
-        if m:
-            xfail_reason = m.group(1)
+        try:
+            xfail = parse_xfail(lines[i])
+        except ValueError as e:
+            raise SystemExit(f"error: {_display_path(path)}:{i + 1}: {e}")
+        if xfail:
+            xfails.append(xfail)
             i += 1
             continue
         if not words or words[0].startswith("#"):
@@ -149,12 +216,20 @@ def parse_slt(path: Path) -> list[Record]:
         if words[0] not in ("statement", "query"):
             # Directives such as `include` and `halt`, which these files do not use.
             conditions = []
-            xfail_reason = None
+            xfails = []
             i += 1
             continue
 
-        record = Record(path=path, line=i + 1, kind=words[0], xfail_reason=xfail_reason)
-        xfail_reason = None
+        record = Record(path=path, line=i + 1, kind=words[0], xfails=xfails)
+        for x in xfails:
+            # A marker that no supported version reaches would never be
+            # reported as stale, so reject it before Spark starts.
+            if all(record.xfail(v) is not x for v in SUPPORTED_VERSIONS):
+                raise SystemExit(
+                    f"error: {_display_path(path)}:{i + 1}: `{x.text}` never applies, because no "
+                    "supported Spark version matches it before an earlier marker does"
+                )
+        xfails = []
         args = words[1:]
         if args and args[0] == "error":
             record.expect_error = True
@@ -177,6 +252,8 @@ def parse_slt(path: Path) -> list[Record]:
                 sql.append(lines[i])
             i += 1
         record.sql = "\n".join(sql)
+        if any(kind == "cast" for kind, _ in _tokenize(record.sql)):
+            raise SystemExit(f"error: {record.location}: write `CAST(x AS type)` instead of `x::type`")
 
         # Expected results (or an expected error message) run until an empty
         # line. A result line may start with `#`, so it is not a comment here,
@@ -194,7 +271,7 @@ def parse_slt(path: Path) -> list[Record]:
 # ---------------------------------------------------------------------------
 # Translating DataFusion SQL to Spark SQL
 #
-# Spark 4.2 parses most of these files as written, including `::` casts.
+# Spark 4.2 parses most of these files as written.
 # Only a few renames are applied here, and `arrow_cast` and `spark_cast`
 # become a CAST (see below). Anything else Spark cannot parse, and any function
 # Spark does not have (such as `arrow_typeof`), is skipped.
@@ -592,13 +669,15 @@ def _visible_type(sql: str) -> Optional[str]:
     """"DATE" or "TIMESTAMP" if a translated expression is visibly one: a typed
     literal, a cast, or a call to a function that returns a DATE. Otherwise None."""
     tokens = _strip_parens(_tokenize(sql))
-    if len(tokens) >= 3 and tokens[-2][0] == "cast":
-        # expr::TYPE, where `::` applies to the whole of expr
-        return _temporal_name(tokens[-1][1]) if _is_operand(tokens[:-2]) else None
     if len(tokens) == 2 and tokens[1][0] == "string":
         return _temporal_name(tokens[0][1])
     # A call: a name followed by its arguments.
-    if len(tokens) < 3 or tokens[0][0] != "word" or not _is_operand(tokens):
+    if (
+        len(tokens) < 3
+        or tokens[0][0] != "word"
+        or tokens[1][1] != "("
+        or _matching_paren(tokens, 1) != len(tokens) - 1
+    ):
         return None
     name = tokens[0][1].lower()
     if name == "cast":
@@ -607,17 +686,6 @@ def _visible_type(sql: str) -> Optional[str]:
             return _temporal_name(inner[-1][1])
         return None
     return "DATE" if name in _DATE_FUNCTIONS else None
-
-
-def _is_operand(tokens: list[tuple[str, str]]) -> bool:
-    """Whether tokens are one operand: a single token, or a name followed by a
-    parenthesized group that runs to the end, such as `f(a, b)` or `(a + b)`."""
-    if len(tokens) == 1:
-        return True
-    start = 1 if tokens[0][0] == "word" else 0
-    if start >= len(tokens) or tokens[start][1] != "(":
-        return False
-    return _matching_paren(tokens, start) == len(tokens) - 1
 
 
 def _temporal_name(type_name: str) -> Optional[str]:
@@ -775,8 +843,6 @@ def translate(sql: str, time_zone: str = "UTC") -> str:
                 "CAST",
                 "TRY_CAST",
             )
-        elif kind == "cast":
-            expect_type = True
         else:
             expect_type = False
             if text == "(":
@@ -1242,17 +1308,22 @@ class SparkRunner:
         except ImportError:
             raise SystemExit(f"error: PySpark is not installed. Install it with `{install}`.")
 
-        if not pyspark.__version__.startswith(SPARK_VERSION + "."):
+        if version_tuple(pyspark.__version__) not in SUPPORTED_VERSIONS:
+            supported = ", ".join(map(_version_string, SUPPORTED_VERSIONS))
             raise SystemExit(
-                f"error: this runner needs PySpark {SPARK_VERSION}, found "
+                f"error: this runner needs PySpark {supported}, found "
                 f"{pyspark.__version__}. Install it with `{install}`."
             )
-        from pyspark.logger import PySparkLogger
-
-        # PySpark logs every failed query to stderr as JSON. The runner reports
-        # them itself.
-        for name in ("SQLQueryContextLogger", "DataFrameQueryContextLogger"):
-            PySparkLogger.getLogger(name).disabled = True
+        try:
+            from pyspark.logger import PySparkLogger
+        except ImportError:
+            # PySpark 3.5 has no pyspark.logger, and does not log failed queries as JSON.
+            pass
+        else:
+            # PySpark logs every failed query to stderr as JSON. The runner
+            # reports them itself.
+            for name in ("SQLQueryContextLogger", "DataFrameQueryContextLogger"):
+                PySparkLogger.getLogger(name).disabled = True
         # Removed when the runner exits.
         self._warehouse = tempfile.TemporaryDirectory(prefix="pyspark-slt-")
         self._start()
@@ -1348,6 +1419,9 @@ class SparkRunner:
             if m:
                 raise SparkError("convert", f"Spark returned a {m.group(1)} value")
             condition = _condition(e)
+            if condition == "CANNOT_PARSE_DATATYPE" and "interval" in str(e):
+                # PySpark 3.5 cannot read a schema with a CalendarIntervalType.
+                raise SparkError("convert", "Spark returned a CalendarIntervalType value")
             if condition == "UNRESOLVED_ROUTINE":
                 name = _parameter(e, "routineName") or "?"
                 raise SparkError("function", f"Spark has no function {name}")
@@ -1472,17 +1546,19 @@ def run_record(runner: SparkRunner, record: Record) -> Outcome:
 
     A difference that the comment expects becomes `xfail`, and a record that
     passes in spite of the comment becomes `xpass`, so a stale comment is
-    reported. A skipped record stays skipped.
+    reported. A skipped record stays skipped. Only a comment whose version
+    condition matches the runner's Spark version applies.
     """
     outcome = _run_record(runner, record)
-    if record.xfail_reason is None:
+    xfail = record.xfail(version_tuple(runner.version))
+    if xfail is None:
         return outcome
     if outcome.status in EXPECTED_TO_FAIL:
-        outcome.detail = f"{DIVERGENT[outcome.status]} ({record.xfail_reason})"
+        outcome.detail = f"{DIVERGENT[outcome.status]} ({xfail.reason})"
         outcome.status = "xfail"
     elif outcome.status == "pass":
         outcome.status = "xpass"
-        outcome.detail = record.xfail_reason
+        outcome.detail = xfail.text
     return outcome
 
 
@@ -1587,7 +1663,7 @@ def report(outcome: Outcome, spark_version: str) -> str:
     if outcome.status == "xfail":
         return f"{location}: expected failure: {outcome.detail}"
     if outcome.status == "xpass":
-        return f"{location}: {DIVERGENT['xpass']}, remove `# xfail {LABEL}: {outcome.detail}`"
+        return f"{location}: {DIVERGENT['xpass']}, remove `{outcome.detail}`"
     parts = [f"{location}: {DIVERGENT[outcome.status]}", _indent(record.sql.split("\n"))]
     if outcome.spark_sql and outcome.spark_sql != record.sql:
         parts += ["  Spark SQL:", _indent(outcome.spark_sql.split("\n"))]
@@ -1617,7 +1693,8 @@ def discover(paths: list[str]) -> list[Path]:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            f"Run the datafusion-spark .slt files on Spark {SPARK_VERSION} and "
+            f"Run the datafusion-spark .slt files on Spark "
+            f"({', '.join(map(_version_string, SUPPORTED_VERSIONS))}) and "
             "report where Spark disagrees with the expected results."
         )
     )
@@ -1637,12 +1714,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     files = discover(args.paths)
     if not files:
         raise SystemExit("error: no .slt files found")
+    # Parsed before Spark starts, so a file that parse_slt rejects fails the run at once.
+    parsed = {path: parse_slt(path) for path in files}
 
     # Keep the output complete when it is piped to a file and the run dies.
     sys.stdout.reconfigure(line_buffering=True)
     runner = SparkRunner()
     print(f"Running {len(files)} file(s) on Spark {runner.version}\n")
-    statuses, skip_reasons, stopped = run_files(runner, files, args.verbose)
+    statuses, skip_reasons, stopped = run_files(runner, parsed, args.verbose)
 
     total = sum(statuses.values())
     print(f"Spark {runner.version}: {total} records in {len(files)} file(s)")
@@ -1668,8 +1747,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 MAX_RESTARTS = 5
 
 
-def run_files(runner, files: list[Path], verbose: bool = False):
-    """Run every record in `files`, printing each difference.
+def run_files(runner, files: dict[Path, list[Record]], verbose: bool = False):
+    """Run the parsed records of each file, printing each difference.
 
     Returns (statuses, skip_reasons, stopped). `stopped` says why the run ended
     early, or is None.
@@ -1693,7 +1772,7 @@ def run_files(runner, files: list[Path], verbose: bool = False):
         return None
 
     broken = False
-    for path in files:
+    for path, records in files.items():
         stopped = None
         if broken:
             stopped = new_session(path, "Spark failed in the previous file")
@@ -1705,7 +1784,7 @@ def run_files(runner, files: list[Path], verbose: bool = False):
         if stopped:
             return statuses, skip_reasons, stopped
         broken = False
-        for record in parse_slt(path):
+        for record in records:
             if broken:
                 # A new session would not have this file's views and settings.
                 outcome = Outcome(record, "skip", "Spark failed earlier in the file")
