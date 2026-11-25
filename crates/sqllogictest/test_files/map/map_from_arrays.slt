@@ -110,21 +110,21 @@ SELECT
 query error
 SELECT map_from_arrays(array(true, false, true), array('a', NULL, 'b'));
 ----
-DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key true was found
+DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key true was found, please check the input data. To allow duplicate keys with last-value-wins semantics, set `spark.map_key_dedup_policy` to `LAST_WIN`.
 
 
 # Integer keys with a duplicate also raise DUPLICATED_MAP_KEY.
 query error
 SELECT map_from_arrays(array(1, 2, 1), array('a', 'b', 'c'));
 ----
-DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key 1 was found
+DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key 1 was found, please check the input data. To allow duplicate keys with last-value-wins semantics, set `spark.map_key_dedup_policy` to `LAST_WIN`.
 
 
 # String keys with a duplicate also raise DUPLICATED_MAP_KEY.
 query error
 SELECT map_from_arrays(array('k', 'k', 'k'), array(1, 2, 3));
 ----
-DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key k was found
+DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key k was found, please check the input data. To allow duplicate keys with last-value-wins semantics, set `spark.map_key_dedup_policy` to `LAST_WIN`.
 
 
 # Multi-row: a clean row and a duplicate row still errors.
@@ -135,7 +135,7 @@ FROM values
     (array[1, 1], array['x', 'y'])
 AS tab(a, b);
 ----
-DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key 1 was found
+DataFusion error: Execution error: [DUPLICATED_MAP_KEY] Duplicate map key 1 was found, please check the input data. To allow duplicate keys with last-value-wins semantics, set `spark.map_key_dedup_policy` to `LAST_WIN`.
 
 
 # Tests with different list types
