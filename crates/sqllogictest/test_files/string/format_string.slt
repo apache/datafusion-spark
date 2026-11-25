@@ -2549,3 +2549,19 @@ query T
 SELECT format_string('Large octal: %o', 9223372036854775807::BIGINT);
 ----
 Large octal: 777777777777777777777
+
+# ================================
+# Zero with %e and %g
+# ================================
+
+## Java's Formatter prints zero with exponent 0: 0.000000e+00 for %e
+query T
+SELECT format_string('%e', 0.0::DOUBLE);
+----
+0.000000e+00
+
+## and 0.00000 for %g with the default precision
+query T
+SELECT format_string('%g', 0.0::DOUBLE);
+----
+0.00000
