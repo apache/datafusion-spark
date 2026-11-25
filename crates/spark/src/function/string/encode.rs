@@ -29,7 +29,8 @@ use datafusion_macros::user_doc;
         `base64` or `hex` and returns a string, this takes a character set and returns binary. \
         Supported character sets are `US-ASCII`, `ISO-8859-1`, `UTF-8`, `UTF-16`, `UTF-16BE`, `UTF-16LE`, \
         and `UTF-32`, matched case-insensitively. Any other character set raises `[INVALID_PARAMETER_VALUE.CHARSET]`. \
-        `UTF-16` writes a big-endian byte order mark first. `UTF-32` is big-endian with no byte order mark. \
+        `UTF-16` writes a big-endian byte order mark first, except for an empty string, which encodes to an empty binary. \
+        `UTF-32` is big-endian with no byte order mark. \
         Characters the character set cannot represent (non-ASCII in `US-ASCII`, code points above U+00FF in \
         `ISO-8859-1`) raise `[MALFORMED_CHARACTER_CODING]`. Binary input is decoded as UTF-8 first, with each \
         invalid byte replaced by U+FFFD. Returns NULL if either input is NULL. \
@@ -200,11 +201,15 @@ fn encode_string(
             }
         }
         "UTF-16" | "UTF16" => {
-            let _ = bytes.try_reserve(2 + s.len() * 2);
-            // BOM (big-endian marker) followed by UTF-16BE encoded bytes
-            bytes.extend_from_slice(&[0xFE, 0xFF]);
-            for code_unit in s.encode_utf16() {
-                bytes.extend_from_slice(&code_unit.to_be_bytes());
+            // Spark returns an empty binary for an empty string: the JDK never runs
+            // the encoder (which is what writes the BOM) for empty input.
+            if !s.is_empty() {
+                let _ = bytes.try_reserve(2 + s.len() * 2);
+                // BOM (big-endian marker) followed by UTF-16BE encoded bytes
+                bytes.extend_from_slice(&[0xFE, 0xFF]);
+                for code_unit in s.encode_utf16() {
+                    bytes.extend_from_slice(&code_unit.to_be_bytes());
+                }
             }
         }
         // Spark treats UTF-32 as UTF-32BE (no BOM), matching Spark 3.5 and 4.1.
@@ -595,6 +600,31 @@ mod tests {
         assert_eq!(
             invoke_encode("A", "utf-32", false, false).unwrap(),
             &[0x00, 0x00, 0x00, 0x41]
+        );
+    }
+
+    #[test]
+    fn test_utf16_empty_string_has_no_bom() {
+        // Spark returns an empty binary for an empty string; the BOM is only
+        // written when there is at least one character to encode.
+        assert_eq!(
+            invoke_encode("", "utf-16", false, false).unwrap(),
+            Vec::<u8>::new()
+        );
+        // Legacy alias goes through the same branch.
+        assert_eq!(
+            invoke_encode("", "utf16", true, false).unwrap(),
+            Vec::<u8>::new()
+        );
+        // Non-empty input still starts with the BOM.
+        assert_eq!(
+            invoke_encode("a", "utf-16", false, false).unwrap(),
+            &[0xFE, 0xFF, 0x00, 0x61]
+        );
+        // Empty binary input decodes to an empty string, so it follows the same rule.
+        assert_eq!(
+            invoke_encode_binary(b"", "utf-16", false, false).unwrap(),
+            Vec::<u8>::new()
         );
     }
 

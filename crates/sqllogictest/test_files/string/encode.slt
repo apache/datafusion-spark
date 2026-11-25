@@ -87,6 +87,23 @@ SELECT encode('😀'::string, 'utf-16'::string);
 ----
 feffd83dde00
 
+# UTF-16: an empty string encodes to an empty binary, with no BOM (Spark)
+query I
+SELECT octet_length(encode(''::string, 'utf-16'::string));
+----
+0
+
+query II
+SELECT octet_length(encode(s, 'utf-16')), octet_length(encode(s, 'utf-16le')) FROM (VALUES (''), ('a')) t(s);
+----
+0 0
+4 2
+
+query ?
+SELECT encode('a'::string, 'utf-16'::string);
+----
+feff0061
+
 statement error INVALID_PARAMETER_VALUE\.CHARSET
 SELECT encode('😀'::string, 'utf-32be'::string);
 
