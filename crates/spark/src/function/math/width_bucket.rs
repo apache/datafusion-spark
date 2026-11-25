@@ -245,11 +245,13 @@ macro_rules! width_bucket_kernel_impl {
                 let h = ($to_f64)(max, i);
                 let buckets = n_bucket.value(i);
 
-                if buckets <= 0 {
+                // Spark treats Long.MaxValue as null (WidthBucket.isNull), and
+                // num_buckets + 1 cannot be represented for it.
+                if buckets <= 0 || buckets == i64::MAX {
                     b.append_null();
                     continue;
                 }
-                let next_bucket = (buckets + 1) as i64;
+                let next_bucket = buckets + 1;
                 if $check_nan {
                     if !x.is_finite() || !l.is_finite() || !h.is_finite() {
                         b.append_null();
@@ -414,6 +416,9 @@ fn bucket_from_f64(
     num_buckets: i64,
     ascending: bool,
 ) -> Option<i64> {
+    if num_buckets <= 0 || num_buckets == i64::MAX {
+        return None;
+    }
     let next_bucket = num_buckets + 1;
 
     if ascending {
@@ -565,6 +570,19 @@ mod tests {
         let out = width_bucket_kern(&[v, lo, hi, n]).unwrap();
         let out = out.as_primitive::<Int64Type>();
         assert!(out.is_null(0));
+    }
+
+    #[test]
+    fn test_width_bucket_f64_i64_max_buckets_is_null() {
+        // Spark's WidthBucket.isNull is true for numBucket == Long.MaxValue, so the
+        // result is NULL instead of overflowing num_buckets + 1.
+        let v = f64_array(&[5.0]);
+        let lo = f64_array(&[0.0]);
+        let hi = f64_array(&[10.0]);
+        let n = i64_array_all(1, i64::MAX);
+
+        let out = width_bucket_kern(&[v, lo, hi, n]).unwrap();
+        assert!(out.as_primitive::<Int64Type>().is_null(0));
     }
 
     #[test]
