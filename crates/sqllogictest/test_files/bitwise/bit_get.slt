@@ -85,3 +85,9 @@ query I
 SELECT bit_get(11, 3::bigint);
 ----
 1
+
+# UInt64 values above i64::MAX return the bit instead of panicking
+query I
+SELECT bit_get(arrow_cast('18446744073709551615', 'UInt64'), 0);
+----
+1
