@@ -3,17 +3,20 @@
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
 use arrow::array::{ArrayRef, GenericStringBuilder, OffsetSizeTrait};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, TimeUnit};
 use datafusion_common::cast::{as_generic_string_array, as_string_view_array};
-use datafusion_common::types::{NativeType, logical_string};
+use datafusion_common::config::ConfigOptions;
 use datafusion_common::utils::{offset_span_len, take_function_args};
 use datafusion_common::{Result, exec_err};
 use datafusion_expr::{
-    Coercion, ColumnarValue, Documentation, ScalarFunctionArgs, ScalarUDFImpl, Signature,
-    TypeSignatureClass, Volatility,
+    ColumnarValue, Documentation, ScalarFunctionArgs, ScalarUDFImpl, Signature,
+    Volatility,
 };
 use datafusion_functions::utils::make_scalar_function;
 use datafusion_macros::user_doc;
+
+use crate::function::conversion::cast::{SparkCastOptions, spark_cast};
+use crate::{EvalMode, SparkTimeZone};
 
 use std::fmt::Write;
 use std::sync::Arc;
@@ -53,13 +56,8 @@ impl Default for SparkQuote {
 
 impl SparkQuote {
     pub fn new() -> Self {
-        let str_coercion = Coercion::new_implicit(
-            TypeSignatureClass::Native(logical_string()),
-            vec![TypeSignatureClass::Any],
-            NativeType::String,
-        );
         Self {
-            signature: Signature::coercible(vec![str_coercion], Volatility::Immutable),
+            signature: Signature::user_defined(Volatility::Immutable),
         }
     }
 }
@@ -77,6 +75,21 @@ impl ScalarUDFImpl for SparkQuote {
         &self.signature
     }
 
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        let [arg] = take_function_args(self.name(), arg_types)?;
+        let target = match arg {
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => arg.clone(),
+            // Kept as a timestamp, so that `invoke_with_args` casts it with
+            // Spark's CAST rather than Arrow's. Spark's timestamps are
+            // microseconds, the only unit `spark_cast` takes.
+            DataType::Timestamp(_, tz) => {
+                DataType::Timestamp(TimeUnit::Microsecond, tz.clone())
+            }
+            _ => DataType::Utf8,
+        };
+        Ok(vec![target])
+    }
+
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         match &arg_types[0] {
             DataType::LargeUtf8 => Ok(DataType::LargeUtf8),
@@ -85,8 +98,36 @@ impl ScalarUDFImpl for SparkQuote {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        make_scalar_function(spark_quote_inner, vec![])(&args.args)
+        let [arg] = take_function_args(self.name(), args.args)?;
+        let arg = match arg.data_type() {
+            DataType::Timestamp(_, _) => {
+                cast_timestamp_to_string(arg, &args.config_options)?
+            }
+            _ => arg,
+        };
+        make_scalar_function(spark_quote_inner, vec![])(&[arg])
     }
+}
+
+/// Spark's `Quote` takes a STRING, so the analyzer casts a timestamp with Spark's
+/// CAST, which writes `yyyy-MM-dd HH:mm:ss[.fraction]` and drops trailing zeros
+/// of the fraction. A TIMESTAMP is written in the session time zone
+/// (`datafusion.execution.time_zone`, UTC when unset), as `spark_cast` does.
+fn cast_timestamp_to_string(
+    arg: ColumnarValue,
+    config: &ConfigOptions,
+) -> Result<ColumnarValue> {
+    let timezone = config
+        .execution
+        .time_zone
+        .as_ref()
+        .map_or("UTC", |tz| tz.as_str());
+    let options = SparkCastOptions::new(EvalMode::from_config(config));
+    let options = match SparkTimeZone::parse(timezone) {
+        Ok(timezone) => options.with_timezone(timezone),
+        Err(e) => options.without_timezone_because(e.to_string()),
+    };
+    spark_cast(arg, &DataType::Utf8, &options)
 }
 
 fn spark_quote_inner(arg: &[ArrayRef]) -> Result<ArrayRef> {

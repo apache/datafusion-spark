@@ -122,11 +122,83 @@ SELECT quote('2024-01-15'::DATE);
 ----
 '2024-01-15'
 
-# xfail spark: quote of a TIMESTAMP uses 'T' between date and time, Spark uses a space (https://github.com/apache/datafusion-spark/issues/96)
+# A timestamp is cast to a string as Spark's CAST does: a space between date and
+# time, and the fraction of a second without trailing zeros (Spark 4.2.0
+# ToStringBase and TimestampFormatter.getFractionFormatter).
 query T
 SELECT quote(arrow_cast('2024-01-15T12:30:45', 'Timestamp(µs)'));
 ----
-'2024-01-15T12:30:45'
+'2024-01-15 12:30:45'
+
+query T
+SELECT quote(arrow_cast('2024-01-15T12:30:45.120', 'Timestamp(µs)'));
+----
+'2024-01-15 12:30:45.12'
+
+query T
+SELECT quote(arrow_cast('2024-01-15T12:30:45.123456', 'Timestamp(µs)'));
+----
+'2024-01-15 12:30:45.123456'
+
+query T
+SELECT quote(arrow_cast('1969-12-31T23:59:59.9', 'Timestamp(µs)'));
+----
+'1969-12-31 23:59:59.9'
+
+query T
+SELECT quote(arrow_cast('2024-01-15T12:30:45.5', 'Timestamp(ms)'));
+----
+'2024-01-15 12:30:45.5'
+
+query T
+SELECT quote(arrow_cast('2024-01-15T12:30:45.5', 'Timestamp(ns)'));
+----
+'2024-01-15 12:30:45.5'
+
+query T
+SELECT quote(arrow_cast('2024-01-15T12:30:45.5Z', 'Timestamp(µs, "UTC")'));
+----
+'2024-01-15 12:30:45.5'
+
+query T
+SELECT quote(arrow_cast(NULL, 'Timestamp(µs)'));
+----
+NULL
+
+query T
+SELECT quote(c) FROM VALUES
+  (arrow_cast('2024-01-15T12:30:45', 'Timestamp(µs)')),
+  (arrow_cast('2024-01-15T12:30:45.010', 'Timestamp(µs)')),
+  (NULL) AS t(c);
+----
+'2024-01-15 12:30:45'
+'2024-01-15 12:30:45.01'
+NULL
+
+# A TIMESTAMP is written in the session time zone. A timestamp without a time
+# zone (Spark's TIMESTAMP_NTZ) is written as it is.
+statement ok
+SET datafusion.execution.time_zone = 'America/Los_Angeles';
+
+query T
+SELECT quote(arrow_cast('2024-01-15T12:30:45Z', 'Timestamp(µs, "America/Los_Angeles")'));
+----
+'2024-01-15 04:30:45'
+
+query T
+SELECT quote(arrow_cast('2024-01-15T12:30:45', 'Timestamp(µs)'));
+----
+'2024-01-15 12:30:45'
+
+# The type's time zone is UTC, which differs from the session time zone.
+# The instant is still written in the session time zone.
+query T
+SELECT quote(arrow_cast('2024-01-15T12:30:45Z', 'Timestamp(µs, "UTC")'));
+----
+'2024-01-15 04:30:45'
+
+statement ok
+RESET datafusion.execution.time_zone;
 
 query T
 SELECT quote('special\n\t\r');
