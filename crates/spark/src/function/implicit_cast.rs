@@ -28,6 +28,12 @@
 //! }
 //! ```
 //!
+//! A function with optional trailing arguments, for example one Spark registers with
+//! several constructors, declares them with [`SparkInputTypes::optional`]. A function
+//! with a variadic tail, such as `concat_ws`, declares them with
+//! [`SparkInputTypes::variadic`]. Both report the counts they accept in Spark's
+//! `WRONG_NUM_ARGS` error.
+//!
 //! This module only chooses the target types. The cast that runs is DataFusion's, so how a
 //! malformed string or an overflowing value is cast is part of the CAST work in #88.
 //!
@@ -86,20 +92,81 @@ pub(crate) enum SparkInputType {
 /// mode that controls those casts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SparkInputTypes {
+    /// The types of the arguments in order. Those after the first `required` are optional.
     types: Vec<SparkInputType>,
+    required: usize,
+    /// The type of the arguments after `types`, for a function with a variadic tail.
+    variadic: Option<Variadic>,
     ansi_mode: bool,
     implicit_casts: bool,
     signature: Signature,
+}
+
+/// A type repeated for the arguments after the fixed ones, as in Spark's
+/// `Seq.fill(children.size - 1)(StringType)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Variadic {
+    repeated: SparkInputType,
+    /// The fewest arguments in total, counting the fixed ones.
+    min_args: usize,
 }
 
 impl SparkInputTypes {
     /// Declares one input type per argument, with ANSI mode off.
     pub(crate) fn new(types: Vec<SparkInputType>, volatility: Volatility) -> Self {
         Self {
+            required: types.len(),
             types,
+            variadic: None,
             ansi_mode: false,
             implicit_casts: true,
             signature: Signature::user_defined(volatility),
+        }
+    }
+
+    /// Declares `required` arguments followed by `optional` trailing ones, with ANSI mode off.
+    ///
+    /// For example `round(expr[, scale])`, which Spark registers with several constructors.
+    /// [`Self::coerce`] returns a type only for the arguments that were given, so the
+    /// function supplies the default for an omitted one itself.
+    #[allow(
+        dead_code,
+        reason = "for functions with optional arguments, such as round, as they move onto these rules (#353)"
+    )]
+    pub(crate) fn optional(
+        required: Vec<SparkInputType>,
+        optional: Vec<SparkInputType>,
+        volatility: Volatility,
+    ) -> Self {
+        let required_len = required.len();
+        let mut types = required;
+        types.extend(optional);
+        Self {
+            required: required_len,
+            ..Self::new(types, volatility)
+        }
+    }
+
+    /// Declares the `fixed` arguments followed by any number of `repeated` ones, with at
+    /// least `min_args` arguments in total and ANSI mode off.
+    ///
+    /// For example, `concat_ws` declares
+    /// `StringType +: Seq.fill(children.size - 1)(arrayOrStr)` and needs at least one
+    /// argument, so it is `variadic(vec![String], OneOf([Array(String), String]), 1, ..)`.
+    #[allow(
+        dead_code,
+        reason = "for variadic functions, such as concat_ws, as they move onto these rules (#353)"
+    )]
+    pub(crate) fn variadic(
+        fixed: Vec<SparkInputType>,
+        repeated: SparkInputType,
+        min_args: usize,
+        volatility: Volatility,
+    ) -> Self {
+        let min_args = min_args.max(fixed.len());
+        Self {
+            variadic: Some(Variadic { repeated, min_args }),
+            ..Self::new(fixed, volatility)
         }
     }
 
@@ -139,19 +206,15 @@ impl SparkInputTypes {
         name: &str,
         arg_types: &[DataType],
     ) -> Result<Vec<DataType>> {
-        if arg_types.len() != self.types.len() {
-            return plan_err!(
-                "[WRONG_NUM_ARGS.WITHOUT_SUGGESTION] The `{name}` requires {} parameters but \
-                 the actual number is {}. Please, refer to \
-                 'https://spark.apache.org/docs/latest/sql-ref-functions.html' for a fix. \
-                 SQLSTATE: 42605",
-                self.types.len(),
-                arg_types.len()
-            );
-        }
+        self.check_arg_count(name, arg_types.len())?;
+        let expected_types = self.types.iter().chain(
+            self.variadic
+                .iter()
+                .flat_map(|v| std::iter::repeat(&v.repeated)),
+        );
         arg_types
             .iter()
-            .zip(&self.types)
+            .zip(expected_types)
             .enumerate()
             .map(|(idx, (arg_type, expected))| {
                 let target = if self.implicit_casts {
@@ -179,6 +242,35 @@ impl SparkInputTypes {
                 }
             })
             .collect()
+    }
+
+    /// Returns Spark's `WRONG_NUM_ARGS` error unless `actual` arguments are accepted.
+    ///
+    /// The expected count is written as Spark's `QueryCompilationErrors.wrongNumArgsError`
+    /// writes it: `2` for one count, `[1, 2]` for several, and `> 1` for a variadic function
+    /// that needs at least two arguments.
+    fn check_arg_count(&self, name: &str, actual: usize) -> Result<()> {
+        let expected = match &self.variadic {
+            Some(Variadic { min_args, .. }) if actual < *min_args => {
+                format!("> {}", min_args - 1)
+            }
+            Some(_) => return Ok(()),
+            None if (self.required..=self.types.len()).contains(&actual) => return Ok(()),
+            None if self.required == self.types.len() => self.types.len().to_string(),
+            None => format!(
+                "[{}]",
+                (self.required..=self.types.len())
+                    .map(|count| count.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        plan_err!(
+            "[WRONG_NUM_ARGS.WITHOUT_SUGGESTION] The `{name}` requires {expected} parameters \
+             but the actual number is {actual}. Please, refer to \
+             'https://spark.apache.org/docs/latest/sql-ref-functions.html' for a fix. \
+             SQLSTATE: 42605"
+        )
     }
 }
 
@@ -779,6 +871,188 @@ mod tests {
         assert!(
             err.contains("requires the (\"STRING\" or \"BINARY\") type"),
             "{err}"
+        );
+    }
+
+    fn wrong_num_args(types: &SparkInputTypes, name: &str, args: &[DataType]) -> String {
+        let err = types.coerce(name, args).unwrap_err().strip_backtrace();
+        assert!(err.contains("[WRONG_NUM_ARGS.WITHOUT_SUGGESTION]"), "{err}");
+        assert!(err.ends_with("SQLSTATE: 42605"), "{err}");
+        err
+    }
+
+    #[test]
+    fn optional_arguments_may_be_omitted() {
+        // round(expr[, scale])
+        let types = SparkInputTypes::optional(
+            vec![T::Numeric],
+            vec![T::Integer],
+            Volatility::Immutable,
+        );
+        assert_eq!(
+            types.coerce("round", &[DataType::Utf8]).unwrap(),
+            vec![DataType::Float64]
+        );
+        assert_eq!(
+            types
+                .coerce("round", &[DataType::Int64, DataType::Int64])
+                .unwrap(),
+            vec![DataType::Int64, DataType::Int32]
+        );
+
+        // The optional argument is still checked when it is given.
+        let err = types
+            .coerce("round", &[DataType::Int32, DataType::Boolean])
+            .unwrap_err()
+            .strip_backtrace();
+        assert!(
+            err.contains(
+                "The second parameter of `round` requires the \"INT\" type, however it has \
+                 the type \"BOOLEAN\""
+            ),
+            "{err}"
+        );
+
+        // Spark lists every count it accepts, as for `to_json` in json-functions.sql.out.
+        let err = wrong_num_args(&types, "round", &[]);
+        assert!(
+            err.contains(
+                "The `round` requires [1, 2] parameters but the actual number is 0. Please, \
+                 refer to 'https://spark.apache.org/docs/latest/sql-ref-functions.html' for a \
+                 fix."
+            ),
+            "{err}"
+        );
+        let three = [DataType::Int32, DataType::Int32, DataType::Int32];
+        let err = wrong_num_args(&types, "round", &three);
+        assert!(
+            err.contains("requires [1, 2] parameters but the actual number is 3."),
+            "{err}"
+        );
+
+        // Several optional arguments: each one given is cast to its own declared type, and
+        // only the arguments given get a type.
+        let types = SparkInputTypes::optional(
+            vec![],
+            vec![T::Integer, T::String, T::Double],
+            Volatility::Immutable,
+        );
+        assert_eq!(types.coerce("f", &[]).unwrap(), vec![]);
+        assert_eq!(
+            types
+                .coerce("f", &[DataType::Int64, DataType::Int32])
+                .unwrap(),
+            vec![DataType::Int32, DataType::Utf8]
+        );
+        let four = vec![DataType::Int32; 4];
+        let err = wrong_num_args(&types, "f", &four);
+        assert!(
+            err.contains("requires [0, 1, 2, 3] parameters but the actual number is 4."),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn variadic_tail_repeats_its_type() {
+        // concat_ws(sep[, str | array(str)]...)
+        let types = SparkInputTypes::variadic(
+            vec![T::String],
+            T::OneOf(vec![T::Array(Box::new(T::String)), T::String]),
+            1,
+            Volatility::Immutable,
+        );
+        assert_eq!(
+            types
+                .coerce(
+                    "concat_ws",
+                    &[
+                        DataType::Int32,
+                        DataType::Utf8,
+                        list(DataType::Int32),
+                        DataType::Int64
+                    ]
+                )
+                .unwrap(),
+            vec![
+                DataType::Utf8,
+                DataType::Utf8,
+                list(DataType::Utf8),
+                DataType::Utf8
+            ]
+        );
+        // Only the separator is enough.
+        assert_eq!(
+            types.coerce("concat_ws", &[DataType::Int32]).unwrap(),
+            vec![DataType::Utf8]
+        );
+
+        // An argument in the variadic tail is reported by its own position.
+        let err = types
+            .coerce(
+                "concat_ws",
+                &[DataType::Utf8, DataType::Utf8, list(list(DataType::Int32))],
+            )
+            .unwrap_err()
+            .strip_backtrace();
+        assert!(
+            err.contains(
+                "The third parameter of `concat_ws` requires the (\"ARRAY<STRING>\" or \
+                 \"STRING\") type, however it has the type \"ARRAY<ARRAY<INT>>\""
+            ),
+            "{err}"
+        );
+
+        // Spark's `concat_ws` raises `wrongNumArgsError(.., Seq("> 0"), ..)`.
+        let err = wrong_num_args(&types, "concat_ws", &[]);
+        assert!(
+            err.contains(
+                "The `concat_ws` requires > 0 parameters but the actual number is 0."
+            ),
+            "{err}"
+        );
+
+        // Only the count is under test here. Spark's elt is not ImplicitCastInputTypes: it
+        // checks that the index is already INT and that every remaining argument is STRING
+        // or BINARY, so this declaration is not the one a later port should copy. Spark
+        // raises `wrongNumArgsError(.., Seq("> 1"), ..)`.
+        let types =
+            SparkInputTypes::variadic(vec![T::Integer], T::Any, 2, Volatility::Immutable);
+        let err = wrong_num_args(&types, "elt", &[DataType::Int32]);
+        assert!(
+            err.contains("The `elt` requires > 1 parameters but the actual number is 1."),
+            "{err}"
+        );
+        assert!(wrong_num_args(&types, "elt", &[]).contains("the actual number is 0."));
+
+        // The fixed arguments are always required, even with a smaller `min_args`.
+        let types = SparkInputTypes::variadic(
+            vec![T::Integer, T::String],
+            T::String,
+            0,
+            Volatility::Immutable,
+        );
+        assert!(
+            wrong_num_args(&types, "f", &[DataType::Int32])
+                .contains("requires > 1 parameters but the actual number is 1.")
+        );
+
+        // A variadic tail with no minimum accepts no arguments at all.
+        let types = SparkInputTypes::variadic(vec![], T::Any, 0, Volatility::Immutable);
+        assert_eq!(types.coerce("f", &[]).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn variadic_arguments_follow_ansi_mode() {
+        let types =
+            SparkInputTypes::variadic(vec![], T::Boolean, 1, Volatility::Immutable);
+        let mut config = ConfigOptions::default();
+        config.execution.enable_ansi_mode = true;
+        let ansi = types.with_config(&config).unwrap();
+        let args = [DataType::Boolean, DataType::Utf8];
+        assert!(types.coerce("f", &args).is_err());
+        assert_eq!(
+            ansi.coerce("f", &args).unwrap(),
+            vec![DataType::Boolean, DataType::Boolean]
         );
     }
 

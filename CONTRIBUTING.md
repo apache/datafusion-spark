@@ -43,7 +43,9 @@ details.
 - **Declared input types.** When the Spark expression is `ImplicitCastInputTypes`, declare its
   `inputTypes` with `SparkInputTypes` (`function/implicit_cast.rs`), which supplies `signature()`,
   `coerce_types()` and `with_updated_config()` with Spark's errors and ANSI rules. See `sha2`. It
-  only chooses the target types, so the cast that then runs is not yet Spark's.
+  only chooses the target types, so the cast that then runs is not yet Spark's. Declare optional
+  trailing arguments with `SparkInputTypes::optional` and a variadic tail with
+  `SparkInputTypes::variadic`. The function still supplies the default for an omitted argument.
 - **Checked input types.** When the expression uses `ExpectsInputTypes` without implicit casts,
   use `SparkInputTypes::check_only`. It shares the declared-type validation and Spark errors,
   accepts untyped NULLs, and unwraps dictionaries. Widen accepted inputs separately when the
