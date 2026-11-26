@@ -4,19 +4,16 @@
 
 use std::sync::Arc;
 
-use arrow::array::timezone::Tz;
+use super::timezone::TimeZoneRules;
 use arrow::array::{Array, ArrayRef, AsArray, PrimitiveBuilder, StringArrayType};
 use arrow::datatypes::TimeUnit;
 use arrow::datatypes::{
     ArrowTimestampType, DataType, Field, FieldRef, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
 };
-use chrono::{DateTime, Offset, TimeZone};
 use datafusion_common::types::{NativeType, logical_string};
 use datafusion_common::utils::take_function_args;
-use datafusion_common::{
-    Result, exec_datafusion_err, exec_err, internal_datafusion_err, internal_err,
-};
+use datafusion_common::{Result, exec_datafusion_err, exec_err, internal_err};
 use datafusion_expr::{
     Coercion, ColumnarValue, Documentation, ReturnFieldArgs, ScalarFunctionArgs,
     ScalarUDFImpl, Signature, TypeSignatureClass, Volatility,
@@ -32,17 +29,22 @@ use datafusion_macros::user_doc;
     description = "Treats `ts` as a wall-clock time in time zone `tz` and returns the UTC wall-clock time. \
         This is the inverse of `from_utc_timestamp`. DataFusion has no built-in equivalent. A string `ts` is cast to a timestamp, \
         so a string with an offset is first converted to UTC. The result has the same type as `ts`, including any time zone \
-        it carries. Returns NULL if either argument is NULL. Unlike `from_utc_timestamp`, `tz` is parsed by Arrow, \
-        so it accepts region IDs and `+HH:MM` offsets but not all of Spark's spellings (such as `GMT+1` or `PST`). \
-        An unknown zone is an error. Within a few hours of a daylight saving time change, the offset can be taken \
-        from the wrong side of the change, so the result can differ from Spark by the size of the change \
-        ([#110](https://github.com/apache/datafusion-spark/issues/110)).",
+        it carries. Returns NULL if either argument is NULL. `tz` accepts the same spellings as `from_utc_timestamp`: \
+        region IDs, offsets such as `+01:00`, `GMT+1`, `UTC+1:2` and `UT-010203`, Java short IDs such as `PST`, and legacy \
+        `SystemV/` IDs. An offset beyond 18 hours or an unknown zone is an error. A time skipped when clocks go forward \
+        moves forward by the length of the gap, and a time that happens twice when clocks go back takes the earlier offset. \
+        Differences from Spark: `tz` is only parsed for rows where both arguments are non-NULL, so an invalid constant `tz` \
+        can return NULL where Spark raises an error; conversion is limited to Chrono's calendar range, which is narrower \
+        than the range Spark implements but covers Spark's documented range; and region rules from `chrono-tz` may differ \
+        after 2099, because it does not extrapolate later daylight saving time transitions.",
     syntax_example = "to_utc_timestamp(ts, tz)",
     sql_example = r#"```sql
 > SELECT to_utc_timestamp('2016-08-31'::timestamp, 'Asia/Seoul');
 2016-08-30T15:00:00
 > SELECT to_utc_timestamp('2018-03-13T06:18:23+02:00', 'America/New_York');
 2018-03-13T08:18:23
+> SELECT to_utc_timestamp('2024-07-01T00:00:00'::timestamp, 'GMT+1');
+2024-06-30T23:00:00
 > SELECT to_utc_timestamp('2016-08-31'::timestamp, NULL);
 NULL
 ```"#,
@@ -52,7 +54,7 @@ NULL
     ),
     argument(
         name = "tz",
-        description = "String time zone that `ts` is in: a region ID such as `Asia/Seoul`, or an offset such as `+09:00`. NULL returns NULL."
+        description = "String time zone that `ts` is in. NULL returns NULL."
     )
 )]
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -186,15 +188,21 @@ where
     let ts_primitive = ts_array.as_primitive::<T>();
     let mut builder = PrimitiveBuilder::<T>::with_capacity(ts_array.len());
 
+    // Parse a scalar zone once per batch and avoid re-parsing consecutive column values
+    let mut last_timezone = None;
+
     for (ts_opt, tz_opt) in ts_primitive.iter().zip(tz_array.iter()) {
         match (ts_opt, tz_opt) {
             (Some(ts), Some(tz_str)) => {
-                let tz: Tz = tz_str.parse().map_err(|e| {
-                    exec_datafusion_err!(
-                        "`to_utc_timestamp`: invalid timezone '{tz_str}': {e}"
-                    )
-                })?;
-                let val = adjust_to_utc_time::<T>(ts, tz)?;
+                let timezone = match last_timezone {
+                    Some((previous, timezone)) if previous == tz_str => timezone,
+                    _ => {
+                        let timezone = parse_timezone(tz_str)?;
+                        last_timezone = Some((tz_str, timezone));
+                        timezone
+                    }
+                };
+                let val = timezone.local_to_utc::<T>(ts)?;
                 builder.append_value(val);
             }
             _ => builder.append_null(),
@@ -205,30 +213,8 @@ where
     Ok(Arc::new(builder.finish()))
 }
 
-fn adjust_to_utc_time<T: ArrowTimestampType>(ts: i64, tz: Tz) -> Result<i64> {
-    let dt = match T::UNIT {
-        TimeUnit::Nanosecond => Some(DateTime::from_timestamp_nanos(ts)),
-        TimeUnit::Microsecond => DateTime::from_timestamp_micros(ts),
-        TimeUnit::Millisecond => DateTime::from_timestamp_millis(ts),
-        TimeUnit::Second => DateTime::from_timestamp(ts, 0),
-    }
-    .ok_or_else(|| internal_datafusion_err!("Invalid timestamp"))?;
-    let naive_dt = dt.naive_utc();
-
-    let offset_seconds = tz
-        .offset_from_utc_datetime(&naive_dt)
-        .fix()
-        .local_minus_utc() as i64;
-
-    let offset_in_unit = match T::UNIT {
-        TimeUnit::Nanosecond => offset_seconds.checked_mul(1_000_000_000),
-        TimeUnit::Microsecond => offset_seconds.checked_mul(1_000_000),
-        TimeUnit::Millisecond => offset_seconds.checked_mul(1_000),
-        TimeUnit::Second => Some(offset_seconds),
-    }
-    .ok_or_else(|| internal_datafusion_err!("Offset overflow"))?;
-
-    ts.checked_sub(offset_in_unit).ok_or_else(|| {
-        internal_datafusion_err!("Timestamp overflow during timezone adjustment")
+fn parse_timezone(timezone: &str) -> Result<TimeZoneRules> {
+    TimeZoneRules::parse(timezone).map_err(|e| {
+        exec_datafusion_err!("`to_utc_timestamp`: invalid timezone '{timezone}': {e}")
     })
 }

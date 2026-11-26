@@ -627,7 +627,7 @@ NULL
 
 ## `to_utc_timestamp`
 
-Treats `ts` as a wall-clock time in time zone `tz` and returns the UTC wall-clock time. This is the inverse of `from_utc_timestamp`. DataFusion has no built-in equivalent. A string `ts` is cast to a timestamp, so a string with an offset is first converted to UTC. The result has the same type as `ts`, including any time zone it carries. Returns NULL if either argument is NULL. Unlike `from_utc_timestamp`, `tz` is parsed by Arrow, so it accepts region IDs and `+HH:MM` offsets but not all of Spark's spellings (such as `GMT+1` or `PST`). An unknown zone is an error. Within a few hours of a daylight saving time change, the offset can be taken from the wrong side of the change, so the result can differ from Spark by the size of the change ([#110](https://github.com/apache/datafusion-spark/issues/110)).
+Treats `ts` as a wall-clock time in time zone `tz` and returns the UTC wall-clock time. This is the inverse of `from_utc_timestamp`. DataFusion has no built-in equivalent. A string `ts` is cast to a timestamp, so a string with an offset is first converted to UTC. The result has the same type as `ts`, including any time zone it carries. Returns NULL if either argument is NULL. `tz` accepts the same spellings as `from_utc_timestamp`: region IDs, offsets such as `+01:00`, `GMT+1`, `UTC+1:2` and `UT-010203`, Java short IDs such as `PST`, and legacy `SystemV/` IDs. An offset beyond 18 hours or an unknown zone is an error. A time skipped when clocks go forward moves forward by the length of the gap, and a time that happens twice when clocks go back takes the earlier offset. Differences from Spark: `tz` is only parsed for rows where both arguments are non-NULL, so an invalid constant `tz` can return NULL where Spark raises an error; conversion is limited to Chrono's calendar range, which is narrower than the range Spark implements but covers Spark's documented range; and region rules from `chrono-tz` may differ after 2099, because it does not extrapolate later daylight saving time transitions.
 
 ```sql
 to_utc_timestamp(ts, tz)
@@ -636,7 +636,7 @@ to_utc_timestamp(ts, tz)
 ### Arguments
 
 - **ts**: Timestamp expression, interpreted as a wall-clock time in `tz`. A string is cast to a timestamp. NULL returns NULL.
-- **tz**: String time zone that `ts` is in: a region ID such as `Asia/Seoul`, or an offset such as `+09:00`. NULL returns NULL.
+- **tz**: String time zone that `ts` is in. NULL returns NULL.
 
 ### Example
 
@@ -645,6 +645,8 @@ to_utc_timestamp(ts, tz)
 2016-08-30T15:00:00
 > SELECT to_utc_timestamp('2018-03-13T06:18:23+02:00', 'America/New_York');
 2018-03-13T08:18:23
+> SELECT to_utc_timestamp('2024-07-01T00:00:00'::timestamp, 'GMT+1');
+2024-06-30T23:00:00
 > SELECT to_utc_timestamp('2016-08-31'::timestamp, NULL);
 NULL
 ```

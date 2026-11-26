@@ -142,16 +142,93 @@ SELECT to_utc_timestamp('2020-11-04T14:06:40'::timestamp, 'America/New_York'::st
 ----
 2020-11-04T19:06:40
 
-# Near a daylight saving time change the offset is taken from the wrong side of the change.
-# Spark returns 2024-03-10T07:30:00 and 2024-11-03T07:30:00 (https://github.com/apache/datafusion-spark/issues/110).
-# xfail spark: to_utc_timestamp takes the offset from the wrong side of a DST change (https://github.com/apache/datafusion-spark/issues/110)
+# Near a daylight saving time change the offset comes from the local time. A time in the gap
+# moves forward by the length of the gap, and a time in the overlap takes the earlier offset.
 query P
 SELECT to_utc_timestamp('2024-03-10T03:30:00'::timestamp, 'America/New_York');
 ----
-2024-03-10T08:30:00
+2024-03-10T07:30:00
 
-# xfail spark: to_utc_timestamp takes the offset from the wrong side of a DST change (https://github.com/apache/datafusion-spark/issues/110)
 query P
 SELECT to_utc_timestamp('2024-11-03T02:30:00'::timestamp, 'America/New_York');
 ----
+2024-11-03T07:30:00
+
+query P
+SELECT to_utc_timestamp('2024-03-10T05:00:00'::timestamp, 'America/Los_Angeles'::string);
+----
+2024-03-10T12:00:00
+
+query P
+SELECT to_utc_timestamp(column1, column2)
+FROM VALUES
+('2024-03-10T01:59:59'::timestamp, 'America/New_York'::string),
+('2024-03-10T02:30:00'::timestamp, 'America/New_York'::string),
+('2024-03-10T03:00:00'::timestamp, 'America/New_York'::string),
+('2024-11-03T00:59:59'::timestamp, 'America/New_York'::string),
+('2024-11-03T01:30:00'::timestamp, 'America/New_York'::string),
+('2024-11-03T02:00:00'::timestamp, 'America/New_York'::string);
+----
+2024-03-10T06:59:59
+2024-03-10T07:30:00
+2024-03-10T07:00:00
+2024-11-03T04:59:59
+2024-11-03T05:30:00
+2024-11-03T07:00:00
+
+# A time before the epoch with a fraction of a second, and the overlap and the gap of a
+# `SystemV` zone.
+query P
+SELECT to_utc_timestamp(column1, column2)
+FROM VALUES
+('1969-12-31T23:59:59.5'::timestamp, 'America/New_York'::string),
+('2024-11-03T01:30:00'::timestamp, 'SystemV/EST5EDT'::string),
+('2024-03-10T02:30:00'::timestamp, 'SystemV/EST5EDT'::string);
+----
+1970-01-01T04:59:59.500
 2024-11-03T06:30:00
+2024-03-10T07:30:00
+
+# The overlap in seconds and in nanoseconds.
+query P
+SELECT to_utc_timestamp(arrow_cast('2024-11-03T01:30:00'::timestamp, 'Timestamp(Second, None)'), 'America/New_York'::string);
+----
+2024-11-03T05:30:00
+
+query P
+SELECT to_utc_timestamp(arrow_cast('2024-11-03T01:30:00.123456789'::timestamp, 'Timestamp(Nanosecond, None)'), 'America/New_York'::string);
+----
+2024-11-03T05:30:00.123456789
+
+# Spark timezone spellings, including second-resolution offsets.
+query P
+SELECT to_utc_timestamp('2024-01-15T12:00:00'::timestamp, 'GMT+1'::string);
+----
+2024-01-15T11:00:00
+
+query P
+SELECT to_utc_timestamp(column1, column2)
+FROM VALUES
+('2024-07-01T00:00:00.123456'::timestamp, 'PST'::string),
+('2024-07-01T00:00:00.123456'::timestamp, 'GMT+1'::string),
+('2024-07-01T00:00:00.123456'::timestamp, 'UTC+1:2'::string),
+('2024-07-01T00:00:00.123456'::timestamp, 'UT-010203'::string),
+('2024-04-15T00:00:00.123456'::timestamp, 'SystemV/PST8PDT'::string),
+('2024-07-01T00:00:00.123456'::timestamp, 'SystemV/HST10'::string),
+(NULL::timestamp, '+19:00'::string);
+----
+2024-07-01T07:00:00.123456
+2024-06-30T23:00:00.123456
+2024-06-30T22:58:00.123456
+2024-07-01T01:02:03.123456
+2024-04-15T08:00:00.123456
+2024-07-01T10:00:00.123456
+NULL
+
+# Arrow accepts this offset, but Spark limits offsets to 18 hours.
+query error invalid timezone '\+19:00'
+SELECT to_utc_timestamp(column1, column2)
+FROM VALUES ('2024-07-01'::timestamp, '+19:00'::string);
+
+query error invalid timezone 'Not/AZone'
+SELECT to_utc_timestamp('2024-07-01'::timestamp, 'Not/AZone'::string);
