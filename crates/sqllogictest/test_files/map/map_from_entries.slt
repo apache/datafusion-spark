@@ -105,7 +105,7 @@ SELECT map_from_entries(array[
     struct(array('c', 'd'), struct(4, 5, 6))
 ]);
 ----
-{[a, b]: {c0: 1, c1: 2, c2: 3}, [c, d]: {c0: 4, c1: 5, c2: 6}}
+{[a, b]: {col1: 1, col2: 2, col3: 3}, [c, d]: {col1: 4, col2: 5, col3: 6}}
 
 # Test with nested function calls
 query ?

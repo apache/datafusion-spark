@@ -17,6 +17,9 @@ use datafusion_expr::{
 ///
 /// * `EXTRACT(field FROM expr)` to the Spark `date_part` function
 /// * `SUBSTRING(expr FROM start FOR len)` to the Spark `substring` function
+/// * `struct(expr, ...)` to the Spark `struct` function, which names the fields
+///   `col1`, `col2`, ... (named structs such as `struct(1 AS a)` are left to
+///   DataFusion)
 ///
 /// It is registered automatically by
 /// `SessionStateBuilderSpark::with_spark_features` (requires the `core`
@@ -81,6 +84,19 @@ impl ExprPlanner for SparkFunctionPlanner {
     fn plan_substring(&self, args: Vec<Expr>) -> Result<PlannerResult<Vec<Expr>>> {
         Ok(PlannerResult::Planned(Expr::ScalarFunction(
             ScalarFunction::new_udf(crate::function::string::substring(), args),
+        )))
+    }
+
+    fn plan_struct_literal(
+        &self,
+        args: Vec<Expr>,
+        is_named_struct: bool,
+    ) -> Result<PlannerResult<Vec<Expr>>> {
+        if is_named_struct {
+            return Ok(PlannerResult::Original(args));
+        }
+        Ok(PlannerResult::Planned(Expr::ScalarFunction(
+            ScalarFunction::new_udf(crate::function::r#struct::r#struct(), args),
         )))
     }
 }
