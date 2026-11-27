@@ -135,12 +135,16 @@ impl PhysicalExpr for SparkAtLeastNNonNullsExpr {
                 result, None,
             ))));
         }
-        // One bit plane per binary digit holds 64 row counts in each chunk.
-        // Increment these counters with a half-adder, saturating at n by masking
-        // out rows that have already reached it.
+        // One bit plane per binary digit holds 64 row counts in each chunk. Counts
+        // start at 2^bits - n, so the increment that takes a row to n valid values
+        // is the one that carries out of the top plane.
         let bits = self.n.ilog2() as usize + 1;
         let chunks = batch.num_rows().div_ceil(64);
-        let mut counts = vec![0_u64; chunks * bits];
+        let start = (1_u64 << bits) - self.n as u64;
+        let mut counts = (0..bits)
+            .map(|bit| if start >> bit & 1 == 1 { u64::MAX } else { 0 })
+            .collect::<Vec<_>>()
+            .repeat(chunks);
         let mut result = vec![0_u64; chunks];
         let mut remaining = batch.num_rows();
         for child in &self.children {
@@ -168,28 +172,18 @@ impl PhysicalExpr for SparkAtLeastNNonNullsExpr {
                 .zip(&mut result)
                 .zip(valid.bit_chunks().iter_padded())
             {
+                // Add one to the valid rows that are still below n.
                 let mut carry = valid & !*result;
-                if carry == 0 {
-                    continue;
-                }
-                for count in counts.iter_mut() {
-                    let next = *count & carry;
-                    *count ^= carry;
-                    carry = next;
+                for count in counts {
                     if carry == 0 {
                         break;
                     }
+                    let next = *count & carry;
+                    *count ^= carry;
+                    carry = next;
                 }
-                // Counts never exceed n, so intersecting its set bit planes
-                // identifies equality without comparing the zero bit planes.
-                let mut threshold = (self.n as u32) ^ (1 << (bits - 1));
-                let mut reached = counts[bits - 1];
-                while threshold != 0 && reached != 0 {
-                    reached &= counts[threshold.trailing_zeros() as usize];
-                    threshold &= threshold - 1;
-                }
-                remaining -= (reached & !*result).count_ones() as usize;
-                *result |= reached;
+                remaining -= carry.count_ones() as usize;
+                *result |= carry;
             }
         }
         // Arrow stores bitmap bytes in little-endian order on every platform.
