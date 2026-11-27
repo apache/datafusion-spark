@@ -2201,6 +2201,25 @@ SELECT format_string('Always decimal: %#.0f', 40.0);
 ----
 Always decimal: 40.
 
+## Combine # flag with scientific notation: the decimal point goes after the mantissa
+# xfail spark: Spark types the literal as DECIMAL, and %f/%e/%g/%a of a DECIMAL errors (https://github.com/apache/datafusion-spark/issues/97)
+query T
+SELECT format_string('Alt sci: %#.0e', 5.0);
+----
+Alt sci: 5.e+00
+
+# xfail spark: Spark types the literal as DECIMAL, and %f/%e/%g/%a of a DECIMAL errors (https://github.com/apache/datafusion-spark/issues/97)
+query T
+SELECT format_string('Alt sci: %#.0E', 12345.0);
+----
+Alt sci: 1.E+04
+
+# xfail spark: Spark types the literal as DECIMAL, and %f/%e/%g/%a of a DECIMAL errors (https://github.com/apache/datafusion-spark/issues/97)
+query T
+SELECT format_string('Alt sci: %#.2e', 5.0);
+----
+Alt sci: 5.00e+00
+
 ## Combine multiple flags with hex
 query T
 SELECT format_string('Hex: %#08x', 255);
