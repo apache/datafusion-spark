@@ -10,7 +10,9 @@ use arrow::array::{
     downcast_integer_array,
 };
 use arrow::compute::try_binary;
-use arrow::datatypes::{ArrowNativeType, DataType, Field, FieldRef, Int8Type, Int32Type};
+use arrow::datatypes::{
+    ArrowNativeType, DataType, Field, FieldRef, Int8Type, Int32Type, UInt64Type,
+};
 use datafusion_common::types::{NativeType, logical_int32};
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, internal_err};
@@ -111,6 +113,19 @@ impl ScalarUDFImpl for SparkBitGet {
     }
 }
 
+fn bit_at(
+    bits: u64,
+    pos: i32,
+    bit_length: i32,
+) -> std::result::Result<i8, arrow::error::ArrowError> {
+    if pos < 0 || pos >= bit_length {
+        return Err(arrow::error::ArrowError::ComputeError(format!(
+            "bit_get: position {pos} is out of bounds. Expected pos < {bit_length} and pos >= 0"
+        )));
+    }
+    Ok(((bits >> pos) & 1) as i8)
+}
+
 fn spark_bit_get_inner<T: ArrowPrimitiveType>(
     value: &PrimitiveArray<T>,
     pos: &Int32Array,
@@ -118,19 +133,35 @@ fn spark_bit_get_inner<T: ArrowPrimitiveType>(
     let bit_length = (size_of::<T::Native>() * 8) as i32;
 
     let result: PrimitiveArray<Int8Type> = try_binary(value, pos, |value, pos| {
-        if pos < 0 || pos >= bit_length {
-            return Err(arrow::error::ArrowError::ComputeError(format!(
-                "bit_get: position {pos} is out of bounds. Expected pos < {bit_length} and pos >= 0"
-            )));
-        }
-        Ok(((value.to_i64().unwrap() >> pos) & 1) as i8)
+        // Every type that reaches this arm fits in an i64. `UInt64` has its own
+        // kernel below, because values above `i64::MAX` have no `i64` view.
+        let bits = value.to_i64().ok_or_else(|| {
+            arrow::error::ArrowError::ComputeError(
+                "bit_get: value does not fit in an i64".to_string(),
+            )
+        })? as u64;
+        bit_at(bits, pos, bit_length)
     })?;
+    Ok(result)
+}
+
+fn spark_bit_get_uint64_inner(
+    value: &PrimitiveArray<UInt64Type>,
+    pos: &Int32Array,
+) -> Result<Int8Array> {
+    let result: PrimitiveArray<Int8Type> =
+        try_binary(value, pos, |value, pos| bit_at(value, pos, 64))?;
     Ok(result)
 }
 
 fn spark_bit_get(args: &[ArrayRef]) -> Result<ArrayRef> {
     let [value, position] = take_function_args("bit_get", args)?;
     let pos_arg = position.as_primitive::<Int32Type>();
+    if matches!(value.data_type(), DataType::UInt64) {
+        let ret =
+            spark_bit_get_uint64_inner(value.as_primitive::<UInt64Type>(), pos_arg)?;
+        return Ok(Arc::new(ret));
+    }
     let ret = downcast_integer_array!(
         value => spark_bit_get_inner(value, pos_arg),
         DataType::Null => Ok(Int8Array::new_null(value.len())),
@@ -158,6 +189,18 @@ mod tests {
 
         assert_eq!(out_field.data_type(), &DataType::Int8);
         assert!(!out_field.is_nullable());
+    }
+
+    #[test]
+    fn test_bit_get_uint64_above_i64_max() {
+        use arrow::array::UInt64Array;
+
+        let value = Arc::new(UInt64Array::from(vec![u64::MAX, 1u64 << 63])) as ArrayRef;
+        let pos = Arc::new(Int32Array::from(vec![0, 63])) as ArrayRef;
+
+        let out = spark_bit_get(&[value, pos]).unwrap();
+        let out = out.as_primitive::<Int8Type>();
+        assert_eq!(out.values(), &[1, 1]);
     }
 
     #[test]
