@@ -11,6 +11,7 @@ pub mod conditional;
 pub mod conversion;
 pub mod csv;
 pub mod datetime;
+pub(crate) mod decimal_utils;
 pub mod error_utils;
 pub(crate) mod float_normalize;
 pub mod functions_nested_utils;
