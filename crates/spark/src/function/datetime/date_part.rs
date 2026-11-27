@@ -121,7 +121,17 @@ impl ScalarUDFImpl for SparkDatePart {
 
     // Nullable, like the integer parts of `date_part`, which this simplifies to,
     // because they can be NULL for a non-null input
-    fn return_field_from_args(&self, _args: ReturnFieldArgs) -> Result<FieldRef> {
+    fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
+        // Reject an invalid literal field while the source expression's name is
+        // still available. Physical argument fields no longer retain that name
+        // for literals, and simplifying the source may fold a cast or function.
+        if let Some(Some(field)) = args.scalar_arguments.first()
+            && let Err(error @ FieldError::Invalid(_)) = check_field(Some(field))
+        {
+            let source =
+                source_argument(args.scalar_arguments[1], args.arg_fields[1].name());
+            return plan_err!("{}", error.message(&source));
+        }
         Ok(Arc::new(Field::new(self.name(), DataType::Int32, true)))
     }
 
@@ -134,8 +144,16 @@ impl ScalarUDFImpl for SparkDatePart {
             ColumnarValue::Scalar(field) => Some(field),
             ColumnarValue::Array(_) => None,
         };
-        let checked = check_field(field).map_err(|e| {
-            exec_datafusion_err!("{}", e.message(args.arg_fields[1].data_type()))
+        let checked = check_field(field).map_err(|error| {
+            // Direct physical callers have evaluated arguments rather than the
+            // original logical expression. Report the scalar value or actual
+            // argument field, without inventing an expression from array rows.
+            let value = match &args.args[1] {
+                ColumnarValue::Scalar(value) => Some(value),
+                ColumnarValue::Array(_) => None,
+            };
+            let source = source_argument(value, args.arg_fields[1].name());
+            exec_datafusion_err!("{}", error.message(&source))
         })?;
         match checked {
             ExtractField::Part(part) => {
@@ -150,7 +168,7 @@ impl ScalarUDFImpl for SparkDatePart {
     fn simplify(
         &self,
         args: Vec<Expr>,
-        info: &SimplifyContext,
+        _info: &SimplifyContext,
     ) -> Result<ExprSimplifyResult> {
         let [part_expr, date_expr] = take_function_args(self.name(), args)?;
 
@@ -164,8 +182,9 @@ impl ScalarUDFImpl for SparkDatePart {
                 )));
             }
             Err(FieldError::Invalid(name)) => {
-                let message =
-                    FieldError::Invalid(name).message(&info.get_data_type(&date_expr)?);
+                let source =
+                    source_argument(date_expr.as_literal(), &date_expr.to_string());
+                let message = FieldError::Invalid(name).message(&source);
                 return plan_err!("{message}");
             }
             // A parameter is not known at planning time, so `invoke_with_args` checks it
@@ -201,10 +220,12 @@ enum FieldError<'a> {
 }
 
 impl FieldError<'_> {
-    fn message(&self, source_type: &DataType) -> String {
+    fn message(&self, source: &str) -> String {
         match self {
             FieldError::Invalid(name) => {
-                format!("Cannot extract `{name}` from {source_type}. SQLSTATE: 42601")
+                format!(
+                    "[INVALID_EXTRACT_FIELD] Cannot extract `{name}` from \"{source}\". SQLSTATE: 42601"
+                )
             }
             FieldError::NotConstant => NOT_CONSTANT.to_string(),
         }
@@ -213,8 +234,28 @@ impl FieldError<'_> {
 
 const NOT_CONSTANT: &str = "First argument of `DATE_PART` must be a constant string";
 
+fn source_argument(value: Option<&ScalarValue>, expression: &str) -> String {
+    match value {
+        Some(value) if value.is_null() => "NULL".to_string(),
+        Some(value @ ScalarValue::Date32(_)) => format!("DATE '{value}'"),
+        Some(
+            value @ (ScalarValue::TimestampSecond(_, None)
+            | ScalarValue::TimestampMillisecond(_, None)
+            | ScalarValue::TimestampMicrosecond(_, None)
+            | ScalarValue::TimestampNanosecond(_, None)),
+        ) => match value.cast_to(&DataType::Utf8) {
+            Ok(ScalarValue::Utf8(Some(value))) => {
+                format!("TIMESTAMP '{}'", value.replace('T', " "))
+            }
+            _ => format!("{value:?}"),
+        },
+        Some(value) => format!("{value:?}"),
+        None => expression.to_string(),
+    }
+}
+
 /// Checks the `field` argument against Spark's field names. The caller formats the
-/// error with the source type and picks the error kind.
+/// error with the available source expression and picks the error kind.
 fn check_field(
     field: Option<&ScalarValue>,
 ) -> std::result::Result<ExtractField, FieldError<'_>> {
@@ -394,13 +435,40 @@ mod tests {
             )
             .unwrap_err();
             assert!(err.to_string().starts_with("Execution error:"), "{err}");
+            assert!(err.to_string().contains("[INVALID_EXTRACT_FIELD]"), "{err}");
             assert!(
                 err.to_string().contains(&format!(
-                    "Cannot extract `{name}` from Date32. SQLSTATE: 42601"
+                    "Cannot extract `{name}` from \"DATE '2000-01-01'\". SQLSTATE: 42601"
                 )),
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn invalid_field_uses_the_source_column_name() {
+        let field = field("QUARTERS");
+        let arg_fields = vec![
+            Arc::new(Field::new("field", DataType::Utf8, false)),
+            Arc::new(Field::new("event_date", DataType::Date32, true)),
+        ];
+        let error = SparkDatePart::new()
+            .return_field_from_args(ReturnFieldArgs {
+                arg_fields: &arg_fields,
+                scalar_arguments: &[Some(&field), None],
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Error during planning: [INVALID_EXTRACT_FIELD] Cannot extract `QUARTERS` from \"event_date\". SQLSTATE: 42601"
+        );
+
+        let source: ArrayRef = Arc::new(Date32Array::from(vec![Some(DATE), None]));
+        let error = invoke(field, ColumnarValue::Array(source)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Execution error: [INVALID_EXTRACT_FIELD] Cannot extract `QUARTERS` from \"source\". SQLSTATE: 42601"
+        );
     }
 
     #[test]
@@ -466,9 +534,10 @@ mod tests {
             ScalarValue::TimestampMicrosecond(Some(TIMESTAMP_SECONDS * 1_000_000), None);
         let err = invoke(field("DAYOFYEAR"), ColumnarValue::Scalar(source)).unwrap_err();
         assert!(err.to_string().starts_with("Execution error:"), "{err}");
+        assert!(err.to_string().contains("[INVALID_EXTRACT_FIELD]"), "{err}");
         assert!(
             err.to_string().contains(
-                "Cannot extract `DAYOFYEAR` from Timestamp(µs). SQLSTATE: 42601"
+                "Cannot extract `DAYOFYEAR` from \"TIMESTAMP '2000-01-01 12:30:45'\". SQLSTATE: 42601"
             ),
             "{err}"
         );
