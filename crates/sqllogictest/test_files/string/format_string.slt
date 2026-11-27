@@ -2565,3 +2565,16 @@ query T
 SELECT format_string('%g', 0.0::DOUBLE);
 ----
 0.00000
+
+# Negative zero and the array-input path
+query T
+SELECT format_string('[%e|%g|%G]', CAST('-0.0' AS DOUBLE), CAST('-0.0' AS DOUBLE), CAST('-0.0' AS DOUBLE));
+----
+[-0.000000e+00|-0.00000|-0.00000]
+
+query T
+SELECT format_string('%g', a) FROM (VALUES (CAST(0.0 AS DOUBLE)), (CAST(1.5 AS DOUBLE)), (CAST(NULL AS DOUBLE))) t(a);
+----
+0.00000
+1.50000
+null
