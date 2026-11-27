@@ -91,3 +91,15 @@ query I
 SELECT bit_get(arrow_cast('18446744073709551615', 'UInt64'), 0);
 ----
 1
+
+# High bits on the array path, plus the bounds check on the new kernel
+query II
+SELECT v, bit_get(v, p) FROM (VALUES (arrow_cast('18446744073709551615', 'UInt64'), 63), (arrow_cast('9223372036854775808', 'UInt64'), 63), (arrow_cast('9223372036854775808', 'UInt64'), 62), (NULL, 1)) t(v, p);
+----
+18446744073709551615 1
+9223372036854775808 1
+9223372036854775808 0
+NULL NULL
+
+query error bit_get: position 64 is out of bounds
+SELECT bit_get(arrow_cast('18446744073709551615', 'UInt64'), 64);
