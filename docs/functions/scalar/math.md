@@ -700,7 +700,7 @@ NULL
 
 ## `width_bucket`
 
-Returns the number of the bucket that `expr` falls into, when the range from `min` to `max` is split into `num_buckets` buckets of equal width. DataFusion has no built-in `width_bucket`. Buckets are numbered from 1. A value before the range returns 0, and a value at or beyond the end of the range returns `num_buckets + 1`. `min` may be greater than `max`, in which case buckets count down from `min`. Works on numbers (cast to DOUBLE), durations and intervals. Returns NULL if any input is NULL, if `num_buckets` is 0 or less, if `min` equals `max`, if a number is NaN or infinite, or if an interval mixes months with days or smaller units.
+Returns the number of the bucket that `expr` falls into, when the range from `min` to `max` is split into `num_buckets` buckets of equal width. DataFusion has no built-in `width_bucket`. Buckets are numbered from 1. A value before the range returns 0, and a value at or beyond the end of the range returns `num_buckets + 1`. `min` may be greater than `max`, in which case buckets count down from `min`. Works on numbers (cast to DOUBLE), durations and intervals. Returns NULL if any input is NULL, if `num_buckets` is 0 or less, if `min` equals `max`, if `expr` is NaN, if `min` or `max` is NaN or infinite, or if an interval mixes months with days or smaller units. An infinite `expr` is before or after the range, so it returns 0 or `num_buckets + 1`.
 
 ```sql
 width_bucket(expr, min, max, num_buckets)
