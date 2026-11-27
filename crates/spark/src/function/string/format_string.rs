@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
 // SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
 
+use crate::function::decimal_utils::java_big_decimal_text;
 use datafusion_macros::user_doc;
 use std::fmt::Write;
 use std::sync::Arc;
@@ -1181,7 +1182,10 @@ impl ConversionSpecifier {
                     (
                         ConversionType::StringLower | ConversionType::StringUpper,
                         Some(value),
-                    ) => self.format_string(string, &value.to_string()),
+                    ) => self.format_string(
+                        string,
+                        &java_big_decimal_text(&value.to_string(), *scale),
+                    ),
                     (t, None) if t.supports_decimal() => {
                         self.format_string(string, "null")
                     }
@@ -1207,7 +1211,10 @@ impl ConversionSpecifier {
                     (
                         ConversionType::StringLower | ConversionType::StringUpper,
                         Some(value),
-                    ) => self.format_string(string, &value.to_string()),
+                    ) => self.format_string(
+                        string,
+                        &java_big_decimal_text(&value.to_string(), *scale),
+                    ),
                     (t, None) if t.supports_decimal() => {
                         self.format_string(string, "null")
                     }

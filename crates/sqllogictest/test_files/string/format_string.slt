@@ -1726,17 +1726,33 @@ SELECT format_string('Compact: %G', 1234.5::DECIMAL(10, 2));
 ----
 Compact: 1234.50
 
-# xfail spark: %s of a DECIMAL prints the unscaled value, Spark prints it with its scale (https://github.com/apache/datafusion-spark/issues/39)
 query T
 SELECT format_string('String: %s', 123.456::DECIMAL(10, 3));
 ----
-String: 123456
+String: 123.456
 
-# xfail spark: %s of a DECIMAL prints the unscaled value, Spark prints it with its scale (https://github.com/apache/datafusion-spark/issues/39)
 query T
 SELECT format_string('String: %S', 123.456::DECIMAL(10, 3));
 ----
-String: 123456
+String: 123.456
+
+query T
+SELECT format_string('%s|%s|%s|%s|%s', 123::DECIMAL(10, 0), 0.05::DECIMAL(10, 2), (-0.05)::DECIMAL(10, 2), 0::DECIMAL(10, 2), 0.000001::DECIMAL(38, 6));
+----
+123|0.05|-0.05|0.00|0.000001
+
+query T
+SELECT format_string('%s|%s|%s|%s', 0.0000001::DECIMAL(38, 7), 0::DECIMAL(38, 10), 0.000000123::DECIMAL(38, 10), (-0.000000123)::DECIMAL(38, 10));
+----
+1E-7|0E-10|1.230E-7|-1.230E-7
+
+query T rowsort
+SELECT format_string('%s', a) FROM (VALUES (0::DECIMAL(38, 10)), (0.000000123::DECIMAL(38, 10)), (123.456::DECIMAL(38, 10)), (NULL)) AS t(a);
+----
+0E-10
+1.230E-7
+123.4560000000
+null
 
 ## Decimal256 with various formats
 # xfail spark: Spark errors for %f/%e/%g/%a of a DECIMAL (https://github.com/apache/datafusion-spark/issues/95)
@@ -1757,11 +1773,10 @@ SELECT format_string('Compact: %g', arrow_cast(1234.5, 'Decimal256(20, 2)'));
 ----
 Compact: 1234.50
 
-# xfail spark: %s of a DECIMAL prints the unscaled value, Spark prints it with its scale (https://github.com/apache/datafusion-spark/issues/39)
 query T
 SELECT format_string('String: %s', arrow_cast(123.456, 'Decimal256(20, 3)'));
 ----
-String: 123456
+String: 123.456
 
 ## Time32Second with time formats
 query T
