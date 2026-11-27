@@ -1739,7 +1739,13 @@ impl ConversionSpecifier {
         if value.is_finite() {
             let mut use_scientific = false;
             let mut abs = value.abs();
-            let mut exponent = abs.log10().floor() as i32;
+            // log10(0) is -inf and the cast below would saturate to i32::MIN;
+            // Java's Formatter prints zero with exponent 0 instead.
+            let mut exponent = if abs == 0.0 {
+                0
+            } else {
+                abs.log10().floor() as i32
+            };
             let mut precision = match self.precision {
                 NumericParam::Literal(p) => p,
                 _ => 6,
@@ -1764,7 +1770,11 @@ impl ConversionSpecifier {
                         10.0_f64.powf((precision - 1 - exponent) as f64);
                     let rounded_fixed = (abs * rounding_factor).round();
                     abs = rounded_fixed / rounding_factor;
-                    exponent = abs.log10().floor() as i32;
+                    exponent = if abs == 0.0 {
+                        0
+                    } else {
+                        abs.log10().floor() as i32
+                    };
                     if exponent < -4 || exponent >= precision {
                         use_scientific = true;
                         precision -= 1;
