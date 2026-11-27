@@ -126,3 +126,7 @@ name = "array_remove"
 [[bench]]
 harness = false
 name = "greatest_least"
+
+[[bench]]
+harness = false
+name = "at_least_n_non_nulls"
