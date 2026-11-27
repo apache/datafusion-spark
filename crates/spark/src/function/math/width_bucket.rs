@@ -42,8 +42,8 @@ use datafusion_expr::Volatility::Immutable;
         Buckets are numbered from 1. A value before the range returns 0, and a value at or beyond the end of the \
         range returns `num_buckets + 1`. `min` may be greater than `max`, in which case buckets count down from `min`. \
         Works on numbers (cast to DOUBLE), durations and intervals. Returns NULL if any input is NULL, if \
-        `num_buckets` is 0 or less, if `min` equals `max`, if a number is NaN or infinite, or if an interval mixes \
-        months with days or smaller units.",
+        `num_buckets` is 0 or less, if `min` equals `max`, if `expr` is NaN, if `min` or `max` is NaN or infinite, or if an interval mixes \
+        months with days or smaller units. An infinite `expr` is before or after the range, so it returns 0 or `num_buckets + 1`.",
     syntax_example = "width_bucket(expr, min, max, num_buckets)",
     sql_example = r#"```sql
 > SELECT width_bucket(5.3, 0.2, 10.6, 5);
@@ -250,8 +250,10 @@ macro_rules! width_bucket_kernel_impl {
                     continue;
                 }
                 let next_bucket = (buckets + 1) as i64;
+                // Like Spark, only a NaN value gives NULL: an infinite value falls
+                // through to the below-min and above-max checks. The bounds must be finite.
                 if $check_nan {
-                    if !x.is_finite() || !l.is_finite() || !h.is_finite() {
+                    if x.is_nan() || !l.is_finite() || !h.is_finite() {
                         b.append_null();
                         continue;
                     }

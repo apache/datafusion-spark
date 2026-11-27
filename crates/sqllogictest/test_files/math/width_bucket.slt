@@ -91,6 +91,28 @@ SELECT width_bucket(5.0, 0.0, 'NaN'::DOUBLE, 5)
 ----
 NULL
 
+# an infinite value is outside the bounds, as in Spark
+query II
+SELECT width_bucket('Infinity'::DOUBLE, 0.0, 10.0, 5), width_bucket('-Infinity'::DOUBLE, 0.0, 10.0, 5)
+----
+6 0
+
+query II
+SELECT width_bucket('Infinity'::DOUBLE, 10.0, 0.0, 5), width_bucket('-Infinity'::DOUBLE, 10.0, 0.0, 5)
+----
+0 6
+
+# the bounds must be finite
+query I
+SELECT width_bucket(5.0, '-Infinity'::DOUBLE, 10.0, 5)
+----
+NULL
+
+query I
+SELECT width_bucket(5.0, 0.0, 'Infinity'::DOUBLE, 5)
+----
+NULL
+
 query I
 SELECT width_bucket(INTERVAL '1' YEAR, INTERVAL '5' YEAR, INTERVAL '5' YEAR, 10)
 ----
